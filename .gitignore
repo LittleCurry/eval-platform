@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+web/dist/
+
+# Go
+server/bin/
+*.test
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Data artifacts
+datasets/raw/*.pdf
+datasets/raw/*.docx
