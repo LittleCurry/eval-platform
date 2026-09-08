@@ -96,13 +96,11 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 
 - 宿主机：macOS 13.7.8（Intel）｜Docker 27.3.1 + Compose v2.30.3｜Go 1.24.13｜Node v26.8.1 + pnpm 12.1.0｜Xcode CLT｜Homebrew。
 - 容器镜像已预拉取：`postgres:16-alpine`、`qdrant/qdrant:1.19.1`（**compose 固定此版本**，勿用 latest 裸标签）。
-- Python：worker 用 `python3.12`（brew，keg-only，路径 `/usr/local/opt/python@3.12/bin/python3.12`，项目内建 venv）。
-- **国内网络注意**：直连 Docker Hub 会超时/被 reset，本机已做三层处理（M7 部署文档要提醒同事机器照做）：
-  1. `~/.docker/daemon.json` 配镜像加速（dockerproxy.net / docker.1ms.run / daocloud / 1panel.live 置前，失效阿里云兜底）+ daemon 代理指向 Clash `127.0.0.1:7897`；
+- Python：worker 用 `python3.14.7`（python.org 官方安装器，`/usr/local/bin/python3`，pip 26.2.1 + venv 正常；项目内建 venv）。migrate 已装（`go install`，位于 `~/go/bin/migrate`，在 `~/.zshrc` PATH 内；`--version` 显示 `dev` 因无 tag，功能正常，如需正式版本号可 `brew install golang-migrate`）。
+- **国内网络注意**：直连 Docker Hub 会超时/被 reset，本机处理方案（M7 部署文档要提醒同事机器照做）：
+  1. `~/.docker/daemon.json` 配镜像加速（dockerproxy.net / docker.1ms.run / daocloud / 1panel.live 置前，失效阿里云兜底）；
   2. **Go 写的 docker CLI 不读 macOS 系统代理** → 已在 `~/.zshrc` 追加 `https_proxy/http_proxy/all_proxy=127.0.0.1:7897`（含 no_proxy 排除镜像域名与 localhost；备份 `~/.zshrc.bak-20260908`）；
-  3. **`docker login`（Docker Desktop 登录态）仍未稳定打通（2026-09 排查结论）**：Docker Desktop 新版把 login 收敛到 daemon 的 access/refresh-token 流程，daemon 在 VM 内出网直连 Docker Hub 被墙；`daemon.json` 的 proxies 与 CLI 环境变量均不保证生效（现象时好时坏）。**公共镜像拉取无需登录且已可用（镜像加速验证过）**。若要 GUI 登录态，二选一由用户在 GUI 操作：
-     - Clash Verge → 开启 **TUN 模式**（网络层接管，最彻底，推荐）；
-     - Docker Desktop → Settings → Resources → Proxies → Manual `http://127.0.0.1:7897` → Apply & Restart。
+  3. **`docker login` ✅ 已打通（2026-09-08）**：根因是 Docker Desktop 新版把 login 收敛到 daemon 的 token 流程，daemon 在 VM 内出网被墙，`daemon.json` 的 proxies 与 CLI 环境变量均无效。正解 = Docker Desktop 设置里开 Manual 代理，且 **HTTP 与 HTTPS 两个框都要填** `http://127.0.0.1:7897`（对应 settings-store.json 的 `ProxyHTTPMode=manual` + `OverrideProxyHTTP` + `OverrideProxyHTTPS`，键值均为 URL 字符串——headless 写入时键名必须照此，否则不生效/崩溃）。登录已验证 `Login Succeeded`；
   4. 凭证安全：Docker Hub 账号/密码若曾在对话或日志出现，用后尽快改密或改用 PAT（`docker login -u 用户名 --password-stdin`）。
 
 ---
