@@ -97,7 +97,10 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 - 宿主机：macOS 13.7.8（Intel）｜Docker 27.3.1 + Compose v2.30.3｜Go 1.24.13｜Node v26.8.1 + pnpm 12.1.0｜Xcode CLT｜Homebrew。
 - 容器镜像已预拉取：`postgres:16-alpine`、`qdrant/qdrant:1.19.1`（**compose 固定此版本**，勿用 latest 裸标签）。
 - Python：worker 用 `python3.12`（brew，keg-only，路径 `/usr/local/opt/python@3.12/bin/python3.12`，项目内建 venv）。
-- **国内网络注意**：直连 Docker Hub 会超时，本机 `~/.docker/daemon.json` 已配镜像加速（dockerproxy.net / docker.1ms.run / daocloud / 1panel.live 置前，失效的阿里云个人版兜底）。M7 部署文档要提醒同事机器同样配置，否则 compose 拉镜像会卡死。
+- **国内网络注意**：直连 Docker Hub 会超时/被 reset，本机已做三层处理（M7 部署文档要提醒同事机器照做）：
+  1. `~/.docker/daemon.json` 配镜像加速（dockerproxy.net / docker.1ms.run / daocloud / 1panel.live 置前，失效阿里云兜底）+ daemon 代理指向 Clash `127.0.0.1:7897`；
+  2. **Go 写的 docker CLI 不读 macOS 系统代理** → 已在 `~/.zshrc` 追加 `https_proxy/http_proxy/all_proxy=127.0.0.1:7897`（含 no_proxy 排除镜像域名与 localhost；备份 `~/.zshrc.bak-20260908`）；
+  3. `docker login` 已验证走代理成功；若日后私有仓库仍异常，改 Docker Desktop GUI → Resources → Proxies 为 Manual，或开 Clash TUN 模式。
 
 ---
 
