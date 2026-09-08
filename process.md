@@ -32,6 +32,7 @@
 | D-A | 评测集为**中文自建领域语料** | 规划评测集建设流程（§5）；UI 与标注界面为中文。**语料已定 = 本地 mock 中文语料《知简 CRM》帮助文档体系**（`datasets/corpus/`，虚构 SaaS 产品，21 篇带 doc_id 的 .md，可整体替换为真实语料，见 §9 Q1） |
 | D-B | 评测平台 + **被测系统通过配置接入** | 核心抽象为统一 Case Runner + Adapter 双模式（内置链路 / 外部 HTTP 服务），Judge 恒在平台内（§4 D3） |
 | D-C | 前端不做产品生态，但**要美观整洁、同事可共用** | 需要登录 + RBAC + 项目数据隔离 + UI 设计基线（§4 D9、M7） |
+| D-D | **模型供应商：先接 DeepSeek（已有 key），架构上支持多厂商切换，并按成本/延迟/难度自动路由** | 抽象 chat/embed/rerank 三类供应商接口 + 路由策略层（§4 D11）；DeepSeek 无 embedding/rerank 接口 → M2 检索侧需第二家供应商（待申请）；judge 单次 run 内固定模型保证可比 |
 
 ### 边界（明确不做 / 注意）
 
@@ -226,6 +227,18 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 - 检索正常、无幻觉但 relevance/helpfulness 低 → **generation_quality**；
 - 外部服务没返回 context → **context_missing**。
 每个 case 依此自动打 `flag`，供报告过滤与标注工作台入口。
+
+### D11 模型供应商抽象与自动路由（多厂商可切换）
+
+目标：先接 DeepSeek 跑通，架构上支持多家 LLM 按 **成本 / 延迟 / 难度** 自动切换，后续申请到新 key 即插即用。
+
+- **三类供应商接口**（OpenAI 兼容为主，个别厂商做薄适配层）：
+  - `chat`：DeepSeek（`deepseek-chat` 默认、`deepseek-reasoner` 用于高难度），后续 Qwen/GLM/vLLM 本地等；
+  - `embed`：DeepSeek **不提供**，M2 前需第二家（候选：SiliconFlow bge-m3、阿里云 text-embedding 等）；
+  - `rerank`：可选，与 embed 同理走支持 rerank 的厂商。
+- **供应商注册表**：`pipeline_profiles` 配置里声明 provider（base_url/api_key 引用/模型名/温度等），API key 只存 `.env`。
+- **路由策略（后期增强，先固定后演进）**：按任务类型（生成/judge/embed）声明候选池 + 规则（成本优先/延迟优先/按 case.difficulty 或题长选模型）。路由命中结果写入 run 快照与 case_results，保证可复盘。
+- **可比性红线**：**judge 模型与 prompt 在单次 run 内固定**，不做逐题路由——跨 run 对比时 judge 必须同一模型+prompt 版本（D5/D7）。路由主要用于**被测生成链路**（模拟生产模型路由）及低难度大批量场景，且要能在报告里看出路由选择。
 
 ---
 
@@ -476,7 +489,7 @@ eval-platform/
 > 多数不影响 M0–M1 骨架，但建议尽早定，避免 M2 返工。
 
 1. **语料领域**：~~第一个领域语料选什么？~~ ✅ **已定**：先落地本地 mock 中文语料《知简 CRM》帮助文档体系（`datasets/corpus/`，21 篇 .md，带 doc_id frontmatter 与稳定小标题，虚构产品无版权顾虑）。后续换真实领域语料时保持目录结构替换即可，评测平台代码不感知语料来源。
-2. **LLM/embedding/reranker 供应商与预算**：judge 与生成用哪家（DeepSeek/Qwen/GLM/本地 vLLM）？embedding 用哪个中文模型（如 bge-m3）？reranker 是否一开始就有可用资源？（M2 只需要 embedding 即可）
+2. **LLM/embedding/reranker 供应商与预算**：~~judge 与生成用哪家……~~ ✅ **部分已定**：先接 **DeepSeek**（`https://api.deepseek.com`，OpenAI 兼容；chat=`deepseek-chat`，推理=`deepseek-reasoner`），架构支持多厂商 + 成本/延迟/难度路由（D-D / D11）。**待定：embedding/rerank 供应商**——DeepSeek 无此类接口，M2 检索侧需要第二家（候选：SiliconFlow 的 bge-m3 / 阿里云 text-embedding；rerank 同源可选）。M2 前申请到即可，不影响 M0/M1。
 3. **是否有现成线上 RAG/Agent 可作 HTTP adapter 的真实被测对象**：有 → 契约按它校准；没有 → M2–M4 先用 builtin 模式，M7 前再接入。
 4. **部署形态**：同事共用是"内网一台机器 docker compose"还是云服务器？影响 M7 部署文档与鉴权强度。
 5. **评测集规模预期**：中期想扩到多少题、是否多领域（决定 datasets/cases 是否需要更重的组织方式）。
