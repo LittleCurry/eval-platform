@@ -100,7 +100,10 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 - **国内网络注意**：直连 Docker Hub 会超时/被 reset，本机已做三层处理（M7 部署文档要提醒同事机器照做）：
   1. `~/.docker/daemon.json` 配镜像加速（dockerproxy.net / docker.1ms.run / daocloud / 1panel.live 置前，失效阿里云兜底）+ daemon 代理指向 Clash `127.0.0.1:7897`；
   2. **Go 写的 docker CLI 不读 macOS 系统代理** → 已在 `~/.zshrc` 追加 `https_proxy/http_proxy/all_proxy=127.0.0.1:7897`（含 no_proxy 排除镜像域名与 localhost；备份 `~/.zshrc.bak-20260908`）；
-  3. `docker login` 已验证走代理成功；若日后私有仓库仍异常，改 Docker Desktop GUI → Resources → Proxies 为 Manual，或开 Clash TUN 模式。
+  3. **`docker login`（Docker Desktop 登录态）仍未稳定打通（2026-09 排查结论）**：Docker Desktop 新版把 login 收敛到 daemon 的 access/refresh-token 流程，daemon 在 VM 内出网直连 Docker Hub 被墙；`daemon.json` 的 proxies 与 CLI 环境变量均不保证生效（现象时好时坏）。**公共镜像拉取无需登录且已可用（镜像加速验证过）**。若要 GUI 登录态，二选一由用户在 GUI 操作：
+     - Clash Verge → 开启 **TUN 模式**（网络层接管，最彻底，推荐）；
+     - Docker Desktop → Settings → Resources → Proxies → Manual `http://127.0.0.1:7897` → Apply & Restart。
+  4. 凭证安全：Docker Hub 账号/密码若曾在对话或日志出现，用后尽快改密或改用 PAT（`docker login -u 用户名 --password-stdin`）。
 
 ---
 
