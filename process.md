@@ -95,7 +95,7 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 ### 本机环境基线（已核验 ✅）
 
 - 宿主机：macOS 13.7.8（Intel）｜Docker 27.3.1 + Compose v2.30.3｜Go 1.24.13｜Node v26.8.1 + pnpm 12.1.0｜Xcode CLT｜Homebrew。
-- 容器镜像已预拉取：`postgres:16-alpine`、`qdrant/qdrant:1.19.1`（**compose 固定此版本**，勿用 latest 裸标签）。
+- 容器镜像已预拉取：`postgres:16-alpine`、`qdrant/qdrant:v1.19.1`（**compose 固定此版本，qdrant 版本标签带 `v` 前缀**，勿用 latest 裸标签）。
 - Python：worker 用 `python3.14.7`（python.org 官方安装器，`/usr/local/bin/python3`，pip 26.2.1 + venv 正常；项目内建 venv）。migrate 已装（`go install`，位于 `~/go/bin/migrate`，在 `~/.zshrc` PATH 内；`--version` 显示 `dev` 因无 tag，功能正常，如需正式版本号可 `brew install golang-migrate`）。
 - **国内网络注意**：直连 Docker Hub 会超时/被 reset，本机处理方案（M7 部署文档要提醒同事机器照做）：
   1. `~/.docker/daemon.json` 配镜像加速（dockerproxy.net / docker.1ms.run / daocloud / 1panel.live 置前，失效阿里云兜底）；
