@@ -1,0 +1,39 @@
+name: eval-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eval-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eval}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eval_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-eval_platform}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    container_name: eval-qdrant
+    ports:
+      - "6333:6333" # REST
+      - "6334:6334" # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  # redis: # M3 异步任务基建可选旁路(缓存/限流/进度推送)，需要时取消注释
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+
+volumes:
+  pgdata:
+  qdrant_storage:
