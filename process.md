@@ -92,6 +92,13 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 - 每个服务独立目录，互不 import 对方代码，只通过 **HTTP API + DB 表** 通信。
 - 评测执行链路（Python）里不写任何"业务 CRUD"，业务 CRUD 不写评测逻辑。
 
+### 本机环境基线（已核验 ✅）
+
+- 宿主机：macOS 13.7.8（Intel）｜Docker 27.3.1 + Compose v2.30.3｜Go 1.24.13｜Node v26.8.1 + pnpm 12.1.0｜Xcode CLT｜Homebrew。
+- 容器镜像已预拉取：`postgres:16-alpine`、`qdrant/qdrant:1.19.1`（**compose 固定此版本**，勿用 latest 裸标签）。
+- Python：worker 用 `python3.12`（brew，keg-only，路径 `/usr/local/opt/python@3.12/bin/python3.12`，项目内建 venv）。
+- **国内网络注意**：直连 Docker Hub 会超时，本机 `~/.docker/daemon.json` 已配镜像加速（dockerproxy.net / docker.1ms.run / daocloud / 1panel.live 置前，失效的阿里云个人版兜底）。M7 部署文档要提醒同事机器同样配置，否则 compose 拉镜像会卡死。
+
 ---
 
 ## 3. 核心领域模型与数据表
