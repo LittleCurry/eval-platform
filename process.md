@@ -305,15 +305,15 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 
 **前置**：§9 待拍板项 3/4/5 至少给方向（不影响骨架，影响 M2 配置）。
 
-**任务清单**
-- [ ] git 仓库规范（main 分支、提交信息规范、.gitignore 含 `.env`）
-- [ ] 目录骨架落地（§7 结构）+ README 开头
-- [ ] `docker-compose.yaml`：postgres + qdrant（+ 可选 redis），健康检查与卷
-- [ ] Go API 骨架：Gin + 配置加载 + 日志 + `/healthz`（含 PG/Qdrant 连通检查）
-- [ ] golang-migrate 接入，首个空 migration + `make migrate`
-- [ ] Python worker 骨架：pyproject + 依赖分组(dev/runtime) + 日志(structlog) + 连 PG/Qdrant 的最小脚本
-- [ ] Makefile：`up-deps/api/worker/web/migrate/test`
-- [ ] 前端脚手架：Vue3+TS+Vite+Naive UI+路由+布局空壳（登录页占位）
+**任务清单**（✅ 2026-09-09 全部完成，tag `v0.1.0-m0`）
+- [x] git 仓库规范（main 分支、提交信息规范、.gitignore 含 `.env`）
+- [x] 目录骨架落地（§7 结构）+ README 开头
+- [x] `docker-compose.yaml`：postgres + qdrant（+ 可选 redis），健康检查与卷
+- [x] Go API 骨架：Gin + 配置加载 + 日志 + `/healthz`（含 PG/Qdrant 连通检查）
+- [x] golang-migrate 接入，首个空 migration + `make migrate`
+- [x] Python worker 骨架：pyproject + 依赖分组(dev/runtime) + 日志(structlog) + 连 PG/Qdrant 的最小脚本
+- [x] Makefile：`up-deps/api/worker/web/migrate/test`
+- [x] 前端脚手架：Vue3+TS+Vite+Naive UI+路由+布局空壳（登录页占位）
 
 **验收标准**：新机器 clone 后按 README 三步能起依赖并访问 API 健康页；`make test` 在各端有占位测试跑通。
 
