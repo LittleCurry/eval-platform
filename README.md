@@ -16,12 +16,14 @@ Go (Gin) + Python worker + PostgreSQL + Qdrant + Redis(可选) + Vue3，Docker C
 | `web/` | 前端控制台 |
 | `datasets/` | 评测集资产（语料/题目） |
 | `docs/` | ADR、部署、故障演练 |
-
-> 完整任务规划与决策记录见 [process.md](process.md)（唯一执行依据）。
+| `process.md` | 完整任务规划与决策记录（唯一执行依据） |
 
 ## 快速开始
 
+前置：Docker Desktop、Go 1.24+、Python 3.11+（开发机用 3.14）、Node 20+（M0-6 起需要）。
+
 ```bash
-cp .env.example .env   # 可选，不复制则用默认值
-make up-deps           # 启动 postgres + qdrant
-docker compose ps      # 确认两个服务 running，postgres healthy
+cp .env.example .env        # 可选，不复制则用默认值
+make up-deps                # 启动 postgres + qdrant
+make migrate-up             # 建库表结构到最新
+make api                    # 起 Go API → http://localhost:8080/healthz
