@@ -1,0 +1,30 @@
+{"qid":"zjc-001","question":"线索超过多少天无跟进会被自动回收？默认值和可配置范围分别是什么？","gold_anchors":[{"doc":"B02","span":"自动回收"}],"reference_answer":"默认 7 天，可配 3–30 天；回收前需无任何真实跟进记录。","category":"线索","difficulty":"中"}
+{"qid":"zjc-002","question":"每人同时在跟线索的上限默认是多少？谁可以调整？","gold_anchors":[{"doc":"B02","span":"领取与在跟上限"}],"reference_answer":"默认 200 条，由系统管理员在「线索设置」调整，范围 100–500。","category":"线索","difficulty":"易"}
+{"qid":"zjc-003","question":"线索标记为已失效时必须做什么？失效原因枚举有哪些？","gold_anchors":[{"doc":"A04","span":"线索状态"}],"reference_answer":"必须选择失效原因；枚举：重复/无效/无意向/无法联系/其他。","category":"线索","difficulty":"易"}
+{"qid":"zjc-004","question":"手工创建客户时哪些字段必填？","gold_anchors":[{"doc":"B01","span":"创建客户"}],"reference_answer":"仅名称必填，其余可选。","category":"客户","difficulty":"易"}
+{"qid":"zjc-005","question":"客户查重按哪两个维度判定重复？","gold_anchors":[{"doc":"B01","span":"查重规则"}],"reference_answer":"统一社会信用代码完全一致；客户名称去除首尾空格并忽略大小写后完全一致。","category":"客户","difficulty":"中"}
+{"qid":"zjc-006","question":"什么情况下客户不允许被删除？","gold_anchors":[{"doc":"B01","span":"删除与恢复"}],"reference_answer":"其下存在进行中的商机时不允许删除，需先关闭商机。","category":"客户","difficulty":"中"}
+{"qid":"zjc-007","question":"合并客户后从记录的联系人、商机、跟进记录去向如何？","gold_anchors":[{"doc":"B01","span":"合并客户"}],"reference_answer":"全部挂到主记录下，从记录本身进入回收站。","category":"客户","difficulty":"难"}
+{"qid":"zjc-008","question":"创建商机的必填字段有哪些？新建时默认落在哪个阶段？","gold_anchors":[{"doc":"B03","span":"商机创建"}],"reference_answer":"必填名称、客户、阶段；默认阶段为初步接触。","category":"商机","difficulty":"易"}
+{"qid":"zjc-009","question":"商机赢单与输单分别必须填写什么？","gold_anchors":[{"doc":"B03","span":"阶段推进"}],"reference_answer":"赢单必填实际金额与赢单日期；输单必选输单原因。","category":"商机","difficulty":"易"}
+{"qid":"zjc-010","question":"线索转化为客户后原线索处于什么状态？","gold_anchors":[{"doc":"B02","span":"线索查重与转化"}],"reference_answer":"状态置为已转化并锁定，不可再编辑。","category":"线索","difficulty":"易"}
+{"qid":"zjc-011","question":"客户详情页的金额汇总口径是什么？","gold_anchors":[{"doc":"B03","span":"金额口径"}],"reference_answer":"该客户下进行中商机的预计金额与已赢单商机实际金额之和。","category":"商机","difficulty":"难"}
+{"qid":"zjc-012","question":"为什么报表里的客户数和商机数不能直接对比？","gold_anchors":[{"doc":"B05","span":"统计口径"}],"reference_answer":"客户数按客户去重（同客户只计一次），商机数不去重（同一客户多条商机分别计数）。","category":"报表","difficulty":"中"}
+{"qid":"zjc-013","question":"团队业绩排名中，一笔赢单业绩归属到谁、按什么日期计入？","gold_anchors":[{"doc":"B05","span":"内置报表"}],"reference_answer":"归属为商机负责人，按赢单日期计入。","category":"报表","difficulty":"中"}
+{"qid":"zjc-014","question":"报表导出单次的行数上限是多少？","gold_anchors":[{"doc":"B05","span":"导出"}],"reference_answer":"10 万行/次，超出需按筛选条件分批导出。","category":"报表","difficulty":"易"}
+{"qid":"zjc-015","question":"批量导入支持的格式、单次行数和文件大小限制是什么？","gold_anchors":[{"doc":"B06","span":"支持的格式与限制"}],"reference_answer":".xlsx 或 .csv（UTF-8），单次不超过 5 万行、文件不超过 20MB。","category":"导入","difficulty":"易"}
+{"qid":"zjc-016","question":"导入遇到重复数据时默认怎么处理？选择更新已有需要什么条件？","gold_anchors":[{"doc":"B06","span":"查重与更新策略"}],"reference_answer":"默认跳过重复；选择更新已有需管理员权限，且操作前强制导出备份。","category":"导入","difficulty":"中"}
+{"qid":"zjc-017","question":"为什么跟进记录普通成员不能修改删除？","gold_anchors":[{"doc":"B04","span":"跟进记录"}],"reference_answer":"防篡改以保护销售过程审计，仅系统管理员可更正。","category":"跟进","difficulty":"中"}
+{"qid":"zjc-018","question":"回访计划产生的提醒算真实跟进吗？会影响线索回收倒计时吗？","gold_anchors":[{"doc":"B04","span":"回访计划"}],"reference_answer":"不算；只有真实登记的跟进记录才重置回收倒计时。","category":"跟进","difficulty":"中"}
+{"qid":"zjc-019","question":"成员收到邀请后需在多长时间内完成注册？","gold_anchors":[{"doc":"C01","span":"成员与席位"}],"reference_answer":"72 小时内完成注册并绑定手机号。","category":"权限","difficulty":"中"}
+{"qid":"zjc-020","question":"系统数据的默认可见性是什么？","gold_anchors":[{"doc":"C02","span":"数据可见性默认值"}],"reference_answer":"默认数据私有：成员只能查看自己负责的记录；经理看本团队，管理员全量。","category":"权限","difficulty":"中"}
+{"qid":"zjc-021","question":"系统内置的敏感字段有哪些？","gold_anchors":[{"doc":"C02","span":"权限模型"}],"reference_answer":"联系人手机号、统一社会信用代码、实际成交金额。","category":"权限","difficulty":"难"}
+{"qid":"zjc-022","question":"自定义字段创建后能修改类型吗？","gold_anchors":[{"doc":"C03","span":"字段约束规则"}],"reference_answer":"不能，类型不可变更；需新建字段并迁移数据。","category":"配置","difficulty":"易"}
+{"qid":"zjc-023","question":"基础版、专业版、旗舰版每对象自定义字段上限分别是多少？","gold_anchors":[{"doc":"C03","span":"自定义字段"}],"reference_answer":"基础版 20 个、专业版 60 个、旗舰版 120 个。","category":"配置","difficulty":"难"}
+{"qid":"zjc-024","question":"回收站的保留期是多久？谁可以恢复？","gold_anchors":[{"doc":"C05","span":"回收站"}],"reference_answer":"统一保留 30 天；仅系统管理员可恢复或彻底删除，到期物理删除不可恢复。","category":"安全","difficulty":"易"}
+{"qid":"zjc-025","question":"登录连续输错几次密码会锁定多久？","gold_anchors":[{"doc":"C05","span":"登录安全"}],"reference_answer":"连续错误 5 次锁定 30 分钟。","category":"安全","difficulty":"中"}
+{"qid":"zjc-026","question":"开放 API 的默认频率限制是多少？超限返回什么响应头？","gold_anchors":[{"doc":"D01","span":"开放 API"}],"reference_answer":"默认 100 次/分钟/IP；超限返回 429 并带 Retry-After 头，旗舰版可申请提升至 500。","category":"API","difficulty":"中"}
+{"qid":"zjc-027","question":"Webhook 投递失败的重试策略是什么？","gold_anchors":[{"doc":"D01","span":"签名与重试"}],"reference_answer":"指数退避重试 3 次，间隔 5 秒、30 秒、5 分钟。","category":"API","difficulty":"难"}
+{"qid":"zjc-028","question":"旧版 /api/v1 批量接口什么时候下线？","gold_anchors":[{"doc":"D01","span":"版本与兼容"},{"doc":"E04","span":"废弃与下线"}],"reference_answer":"2025-09-30 下线，需在此之前迁移至 /api/v2。","category":"API","difficulty":"易"}
+{"qid":"zjc-029","question":"通过平台向客户批量发送企微消息的每日上限是多少？","gold_anchors":[{"doc":"D02","span":"企业微信集成"}],"reference_answer":"50 条/成员/天，超限当日拦截并提示次日再发。","category":"集成","difficulty":"易"}
+{"qid":"zjc-030","question":"平台侧的备份策略与数据恢复目标是什么？","gold_anchors":[{"doc":"D03","span":"平台侧备份"}],"reference_answer":"每日 1 次全量备份加每 30 分钟增量备份，备份保留 14 天；RPO 不超过 30 分钟、RTO 不超过 4 小时。","category":"集成","difficulty":"中"}
