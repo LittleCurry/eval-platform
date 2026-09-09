@@ -1,0 +1,23 @@
+import type { RouteRecordRaw } from 'vue-router'
+
+// 组件用懒加载: 首屏不下载, 构建时自动分包
+export const routes: RouteRecordRaw[] = [
+    {
+        path: '/',
+        component: () => import('../layouts/DefaultLayout.vue'),
+        children: [
+            {
+                path: '',
+                name: 'home',
+                component: () => import('../views/HomeView.vue'),
+                meta: { title: '概览' },
+            },
+        ],
+    },
+    {
+        path: '/login',
+        name: 'login',
+        component: () => import('../views/LoginView.vue'),
+        meta: { title: '登录' },
+    },
+]

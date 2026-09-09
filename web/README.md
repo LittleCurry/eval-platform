@@ -1,4 +1,5 @@
-# web — 前端控制台
+# Vue 3 + TypeScript + Vite
 
-Vue3 + TypeScript + Vite + Naive UI + ECharts。
-页面：登录/语料/数据集/任务/报告/对比/标注。脚手架自 M0-6 起搭建。
+This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+
+Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
