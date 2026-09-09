@@ -19,13 +19,19 @@ func main() {
 
 	pg, err := store.NewPostgres(cfg.PostgresDSN())
 	if err != nil {
-		log.Printf("[warn] 初始化 postgres 失败, 探活交给 /healthz: %v", err)
-	} else {
-		defer pg.Close()
+		log.Fatalf("初始化 postgres 失败: %v", err)
 	}
+	defer pg.Close()
 
 	qd := store.NewQdrant(cfg.QdrantURL)
-	router := serverhttp.NewRouter(pg, qd)
+
+	router := serverhttp.NewRouter(serverhttp.Deps{
+		Postgres:  pg,
+		Qdrant:    qd,
+		Projects:  pg,
+		Corpora:   pg,
+		Documents: pg,
+	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}
 

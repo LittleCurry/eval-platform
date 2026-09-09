@@ -6,16 +6,41 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// NewRouter 组装全部路由。依赖以 Pinger 接口注入, 便于测试替换。
-func NewRouter(postgres, qdrant Pinger) *gin.Engine {
+// Deps 聚合 handler 所需依赖; store 以接口注入, 便于测试替换。
+type Deps struct {
+	Postgres  Pinger
+	Qdrant    Pinger
+	Projects  ProjectStore
+	Corpora   CorpusStore
+	Documents DocumentStore
+}
+
+// NewRouter 组装全部路由。
+func NewRouter(d Deps) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
-	health := newHealthHandler(postgres, qdrant)
+	health := newHealthHandler(d.Postgres, d.Qdrant)
 	r.GET("/healthz", health.Healthz)
-
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"service": "eval-platform", "docs": "/healthz"})
 	})
+
+	projects := newProjectHandler(d.Projects)
+	corpora := newCorpusHandler(d.Corpora)
+	documents := newDocumentHandler(d.Documents)
+
+	v1 := r.Group("/api/v1")
+	v1.GET("/projects", projects.List)
+	v1.POST("/projects", projects.Create)
+	v1.GET("/corpora", corpora.List)
+	v1.POST("/corpora", corpora.Create)
+	v1.GET("/corpora/:id", corpora.Get)
+	v1.PATCH("/corpora/:id", corpora.Update)
+	v1.DELETE("/corpora/:id", corpora.Delete)
+	v1.POST("/corpora/:id/documents", documents.Create)
+	v1.GET("/corpora/:id/documents", documents.List)
+	v1.GET("/documents/:id", documents.Get)
+	v1.DELETE("/documents/:id", documents.Delete)
 	return r
 }

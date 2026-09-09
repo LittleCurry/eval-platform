@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,10 +14,20 @@ type fakePinger struct{ err error }
 
 func (f fakePinger) Ping(_ context.Context) error { return f.err }
 
+func newTestRouter(pg, qd Pinger, projects ProjectStore, corpora CorpusStore, docs DocumentStore) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	return NewRouter(Deps{
+		Postgres:  pg,
+		Qdrant:    qd,
+		Projects:  projects,
+		Corpora:   corpora,
+		Documents: docs,
+	})
+}
+
 func doHealthz(t *testing.T, pg, qd Pinger) (int, map[string]any) {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
-	r := NewRouter(pg, qd)
+	r := newTestRouter(pg, qd, nil, nil, nil)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	r.ServeHTTP(w, req)
@@ -45,7 +54,7 @@ func TestHealthzAllUp(t *testing.T) {
 }
 
 func TestHealthzPostgresDown(t *testing.T) {
-	code, body := doHealthz(t, fakePinger{err: errors.New("boom")}, fakePinger{})
+	code, body := doHealthz(t, fakePinger{err: errNotInitialized}, fakePinger{})
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("code = %d, want 503", code)
 	}
