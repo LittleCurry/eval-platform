@@ -1,8 +1,11 @@
-.PHONY: help up-deps down-deps ps
+.PHONY: help up-deps down-deps ps api migrate-up migrate-down migrate-version \
+        migrate-create worker-setup worker-test worker-lint worker-healthcheck \
+        test lint verify
 
 help: ## 显示可用目标
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
+# ---- 依赖服务 (docker compose) ----
 up-deps: ## 启动依赖服务 (postgres + qdrant)
 	docker compose up -d
 
@@ -12,8 +15,12 @@ down-deps: ## 停止并移除依赖服务容器
 ps: ## 查看依赖服务状态
 	docker compose ps
 
+# ---- Go API ----
+api: ## 本地运行 Go API (先 make up-deps)
+	cd server && go run ./cmd/api
+
 # ---- 数据库迁移 (golang-migrate) ----
--include .env                       # 若存在 .env 则读入, 允许覆盖下面默认值
+-include .env
 POSTGRES_USER     ?= eval
 POSTGRES_PASSWORD ?= eval_dev_password
 POSTGRES_DB       ?= eval_platform
@@ -33,3 +40,35 @@ migrate-version: ## 查看当前迁移版本
 migrate-create: ## 新建迁移: make migrate-create NAME=add_users
 	@test -n "$(NAME)" || (echo "用法: make migrate-create NAME=xxx"; exit 1)
 	$(MIGRATE) create -ext sql -dir server/migrations -seq "$(NAME)"
+
+# ---- Python worker ----
+PYTHON ?= /usr/local/bin/python3
+
+worker-setup: ## 创建 worker venv 并安装依赖(含 dev)
+	$(PYTHON) -m venv worker/.venv
+	cd worker && .venv/bin/pip install -U pip
+	cd worker && .venv/bin/pip install -e ".[dev]"
+
+worker-test: ## 运行 worker 单元测试
+	cd worker && .venv/bin/pytest -q
+
+worker-lint: ## ruff 静态检查
+	cd worker && .venv/bin/ruff check .
+
+worker-healthcheck: ## worker 依赖连通性自检
+	cd worker && .venv/bin/python -m app.healthcheck
+
+# ---- 全量收口 ----
+test: ## 运行全部单测 (Go + Python)
+	cd server && go test ./...
+	cd worker && .venv/bin/pytest -q
+
+lint: ## 静态检查 (go vet + ruff)
+	cd server && go vet ./...
+	cd worker && .venv/bin/ruff check .
+
+verify: ## 一键全量验证 (起依赖 + 迁移 + 测试 + lint)
+	@make up-deps
+	@make migrate-up
+	@make test
+	@make lint
