@@ -59,9 +59,10 @@ worker-healthcheck: ## worker 依赖连通性自检
 	cd worker && .venv/bin/python -m app.healthcheck
 
 # ---- 全量收口 ----
-test: ## 运行全部单测 (Go + Python)
+test: ## 运行全部单测 (Go + Python + Web)
 	cd server && go test ./...
 	cd worker && .venv/bin/pytest -q
+	cd web && pnpm test
 
 lint: ## 静态检查 (go vet + ruff)
 	cd server && go vet ./...
@@ -72,3 +73,18 @@ verify: ## 一键全量验证 (起依赖 + 迁移 + 测试 + lint)
 	@make migrate-up
 	@make test
 	@make lint
+
+# ---- Web (前端) ----
+.PHONY: web-install web web-build web-test
+
+web-install: ## 安装前端依赖 (pnpm install)
+	cd web && pnpm install
+
+web: ## 前端开发服务器 (vite, 默认 :5173)
+	cd web && pnpm dev
+
+web-build: ## 前端生产构建 (type-check + 打包)
+	cd web && pnpm build
+
+web-test: ## 前端单测 (vitest)
+	cd web && pnpm test

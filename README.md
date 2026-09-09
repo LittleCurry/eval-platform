@@ -20,10 +20,32 @@ Go (Gin) + Python worker + PostgreSQL + Qdrant + Redis(可选) + Vue3，Docker C
 
 ## 快速开始
 
-前置：Docker Desktop、Go 1.24+、Python 3.11+（开发机用 3.14）、Node 20+（M0-6 起需要）。
+前置：Docker Desktop、Go 1.24+、Python 3.11+（开发机 3.14）、Node 20+（`web/` 需要，配 pnpm）。
 
 ```bash
 cp .env.example .env        # 可选，不复制则用默认值
 make up-deps                # 启动 postgres + qdrant
 make migrate-up             # 建库表结构到最新
 make api                    # 起 Go API → http://localhost:8080/healthz
+```
+
+另一个终端：
+
+```bash
+make worker-setup           # 首次：建 venv 装依赖
+make worker-healthcheck     # worker 侧连通性自检
+make web-install && make web   # 前端首次安装并起 dev server → http://localhost:5173
+```
+
+## 开发循环
+
+```bash
+make test       # 全部单测 (Go + Python + Web)
+make lint       # go vet + ruff
+make verify     # 一键全量验证 (起依赖 + 迁移 + 测试 + lint)
+make help       # 查看全部命令
+```
+
+## 状态
+
+- M0：环境与骨架 ✅（2026-09-09）
