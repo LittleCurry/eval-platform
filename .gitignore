@@ -26,3 +26,4 @@ server/bin/
 # Data artifacts
 datasets/raw/*.pdf
 datasets/raw/*.docx
+*.egg-info/
