@@ -31,6 +31,8 @@ func main() {
 		Projects:  pg,
 		Corpora:   pg,
 		Documents: pg,
+		Datasets:  pg,
+		Cases:     pg,
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}

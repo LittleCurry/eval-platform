@@ -13,6 +13,8 @@ type Deps struct {
 	Projects  ProjectStore
 	Corpora   CorpusStore
 	Documents DocumentStore
+	Datasets  DatasetStore
+	Cases     CaseStore
 }
 
 // NewRouter 组装全部路由。
@@ -29,6 +31,8 @@ func NewRouter(d Deps) *gin.Engine {
 	projects := newProjectHandler(d.Projects)
 	corpora := newCorpusHandler(d.Corpora)
 	documents := newDocumentHandler(d.Documents)
+	datasets := newDatasetHandler(d.Datasets)
+	cases := newCaseHandler(d.Cases)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)
@@ -42,5 +46,13 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.GET("/corpora/:id/documents", documents.List)
 	v1.GET("/documents/:id", documents.Get)
 	v1.DELETE("/documents/:id", documents.Delete)
+	v1.GET("/datasets", datasets.List)
+	v1.POST("/datasets", datasets.Create)
+	v1.GET("/datasets/:id", datasets.Get)
+	v1.DELETE("/datasets/:id", datasets.Delete)
+	v1.POST("/datasets/:id/cases/import", cases.Import)
+	v1.GET("/datasets/:id/cases", cases.List)
+	v1.GET("/cases/:id", cases.Get)
+	v1.DELETE("/cases/:id", cases.Delete)
 	return r
 }

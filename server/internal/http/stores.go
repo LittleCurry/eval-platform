@@ -27,3 +27,17 @@ type DocumentStore interface {
 	GetDocument(ctx context.Context, id int64) (store.Document, error)
 	DeleteDocument(ctx context.Context, id int64) error
 }
+
+type DatasetStore interface {
+	ListDatasets(ctx context.Context, projectID int64) ([]store.Dataset, error)
+	CreateDataset(ctx context.Context, projectID int64, name, description string) (store.Dataset, error)
+	GetDataset(ctx context.Context, id int64) (store.Dataset, error)
+	DeleteDataset(ctx context.Context, id int64) error
+}
+
+type CaseStore interface {
+	ListCases(ctx context.Context, datasetID int64) ([]store.Case, error)
+	GetCase(ctx context.Context, id int64) (store.Case, error)
+	DeleteCase(ctx context.Context, id int64) error
+	ImportValidCases(ctx context.Context, datasetID int64, inputs []store.CaseInput) (store.CaseImportResult, error)
+}
