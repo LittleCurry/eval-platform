@@ -41,3 +41,11 @@ type CaseStore interface {
 	DeleteCase(ctx context.Context, id int64) error
 	ImportValidCases(ctx context.Context, datasetID int64, inputs []store.CaseInput) (store.CaseImportResult, error)
 }
+
+// RunStore 是评测运行结果的只读访问(报告 API 用)。
+type RunStore interface {
+	ListRuns(ctx context.Context, datasetID, projectID int64, limit int) ([]store.Run, error)
+	GetRun(ctx context.Context, id int64) (store.Run, error)
+	ListRunCaseResults(ctx context.Context, runID int64, limit int, flaggedOnly bool) ([]store.RunCaseResult, error)
+	ListRunFlagCounts(ctx context.Context, runID int64) (map[string]int, error)
+}
