@@ -1,6 +1,7 @@
 package http
 
 import (
+	"eval-platform/server/internal/eval"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -8,14 +9,15 @@ import (
 
 // Deps 聚合 handler 所需依赖; store 以接口注入, 便于测试替换。
 type Deps struct {
-	Postgres  Pinger
-	Qdrant    Pinger
-	Projects  ProjectStore
-	Corpora   CorpusStore
-	Documents DocumentStore
-	Datasets  DatasetStore
-	Cases     CaseStore
-	Runs      RunStore
+	Postgres      Pinger
+	Qdrant        Pinger
+	Projects      ProjectStore
+	Corpora       CorpusStore
+	Documents     DocumentStore
+	Datasets      DatasetStore
+	Cases         CaseStore
+	Runs          RunStore
+	EvalEmbedding eval.EmbeddingConfig
 }
 
 // NewRouter 组装全部路由。
@@ -34,7 +36,7 @@ func NewRouter(d Deps) *gin.Engine {
 	documents := newDocumentHandler(d.Documents)
 	datasets := newDatasetHandler(d.Datasets)
 	cases := newCaseHandler(d.Cases)
-	runs := newRunHandler(d.Runs)
+	runs := newRunHandler(d.Runs, d.EvalEmbedding)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)
@@ -56,6 +58,7 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.GET("/datasets/:id/cases", cases.List)
 	v1.GET("/cases/:id", cases.Get)
 	v1.DELETE("/cases/:id", cases.Delete)
+	v1.POST("/runs", runs.Submit)
 	v1.GET("/runs", runs.List)
 	v1.GET("/runs/:id", runs.Get)
 	v1.GET("/runs/:id/case-results", runs.CaseResults)

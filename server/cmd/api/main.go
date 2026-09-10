@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"eval-platform/server/internal/eval"
 	"log"
 	"net/http"
 	"os"
@@ -34,6 +35,13 @@ func main() {
 		Datasets:  pg,
 		Cases:     pg,
 		Runs:      pg,
+		EvalEmbedding: eval.EmbeddingConfig{
+			Provider:  cfg.EmbeddingProvider,
+			BaseURL:   cfg.EmbeddingBaseURL,
+			Model:     cfg.EmbeddingModel,
+			Dim:       cfg.EmbeddingDim,
+			BatchSize: cfg.EmbeddingBatchSize,
+		},
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}

@@ -42,10 +42,14 @@ type CaseStore interface {
 	ImportValidCases(ctx context.Context, datasetID int64, inputs []store.CaseInput) (store.CaseImportResult, error)
 }
 
-// RunStore 是评测运行结果的只读访问(报告 API 用)。
+// RunStore 是评测运行结果的只读访问 + 任务提交(报告 API 与 M3 任务编排用)。
 type RunStore interface {
 	ListRuns(ctx context.Context, datasetID, projectID int64, limit int) ([]store.Run, error)
 	GetRun(ctx context.Context, id int64) (store.Run, error)
 	ListRunCaseResults(ctx context.Context, runID int64, limit int, flaggedOnly bool) ([]store.RunCaseResult, error)
 	ListRunFlagCounts(ctx context.Context, runID int64) (map[string]int, error)
+
+	// 任务编排(M3)
+	GetDatasetProject(ctx context.Context, datasetID int64) (int64, error)
+	CreateRunWithJob(ctx context.Context, in store.CreateRunInput) (store.RunJobRef, error)
 }

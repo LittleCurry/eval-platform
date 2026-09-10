@@ -5,17 +5,25 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"eval-platform/server/internal/eval"
 	"eval-platform/server/internal/store"
 )
 
 type runHandler struct {
-	store RunStore
+	store     RunStore
+	embedding eval.EmbeddingConfig
 }
 
-func newRunHandler(s RunStore) *runHandler { return &runHandler{store: s} }
+func newRunHandler(s RunStore, embedding eval.EmbeddingConfig) *runHandler {
+	if embedding.Provider == "" {
+		embedding = eval.DefaultEmbedding()
+	}
+	return &runHandler{store: s, embedding: embedding}
+}
 
 // queryInt 读取整型查询参数; 缺失或非法时用默认值。
 func queryInt(c *gin.Context, key string, def int) int {
@@ -140,5 +148,130 @@ func (h *runHandler) Report(c *gin.Context) {
 		"metrics":     run.Metrics,
 		"worst_cases": worstCases,
 		"flag_counts": flagCounts,
+	})
+}
+
+// ---- M3: 任务提交 ----
+
+type submitRunChunking struct {
+	Strategy  string `json:"strategy"`
+	ChunkSize int    `json:"chunk_size"`
+	Overlap   int    `json:"overlap"`
+	MinChars  int    `json:"min_chars"`
+}
+
+type submitRunReq struct {
+	DatasetID int64              `json:"dataset_id"`
+	CorpusID  int64              `json:"corpus_id"`
+	ProjectID int64              `json:"project_id"`
+	TopK      int                `json:"top_k"`
+	Chunking  *submitRunChunking `json:"chunking"`
+}
+
+// Submit POST /runs
+// 提交一次评测任务: 建 run + job + 全部 case 的 job_items, 立即返回(不等评测跑完)。
+// 这是"评测任务异步化"的入口: HTTP 只负责落库与入队, 执行交给 worker。
+func (h *runHandler) Submit(c *gin.Context) {
+	var req submitRunReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeErr(c, http.StatusBadRequest, "请求体不是合法 JSON")
+		return
+	}
+	if req.DatasetID <= 0 {
+		writeErr(c, http.StatusBadRequest, "dataset_id 必填且为正整数")
+		return
+	}
+	if req.CorpusID <= 0 {
+		writeErr(c, http.StatusBadRequest, "corpus_id 必填且为正整数")
+		return
+	}
+	if req.TopK <= 0 {
+		req.TopK = 5
+	}
+	if req.TopK > 50 {
+		writeErr(c, http.StatusBadRequest, "top_k 过大(上限 50)")
+		return
+	}
+
+	chunking := eval.DefaultChunking()
+	if req.Chunking != nil {
+		chunking = eval.ChunkingConfig{
+			Strategy:  req.Chunking.Strategy,
+			ChunkSize: req.Chunking.ChunkSize,
+			Overlap:   req.Chunking.Overlap,
+			MinChars:  req.Chunking.MinChars,
+		}
+	}
+	if err := chunking.Validate(); err != nil {
+		writeErr(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := c.Request.Context()
+	projectID := req.ProjectID
+	if projectID <= 0 {
+		derived, err := h.store.GetDatasetProject(ctx, req.DatasetID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeErr(c, http.StatusNotFound, "数据集不存在")
+				return
+			}
+			log.Printf("get dataset project %d: %v", req.DatasetID, err)
+			writeErr(c, http.StatusInternalServerError, "查询失败")
+			return
+		}
+		projectID = derived
+	}
+
+	snapshot := eval.BuildSnapshot(eval.SnapshotInput{
+		Chunking:  chunking,
+		Embedding: h.embedding,
+		CorpusID:  req.CorpusID,
+		DatasetID: req.DatasetID,
+		TopK:      req.TopK,
+	})
+	configHash, err := eval.SnapshotHash(snapshot)
+	if err != nil {
+		log.Printf("hash snapshot: %v", err)
+		writeErr(c, http.StatusInternalServerError, "配置快照生成失败")
+		return
+	}
+	chunkingHash, err := eval.ChunkingHash(chunking)
+	if err != nil {
+		log.Printf("hash chunking: %v", err)
+		writeErr(c, http.StatusInternalServerError, "切分指纹生成失败")
+		return
+	}
+
+	ref, err := h.store.CreateRunWithJob(ctx, store.CreateRunInput{
+		ProjectID:      projectID,
+		DatasetID:      req.DatasetID,
+		CorpusID:       req.CorpusID,
+		ConfigSnapshot: snapshot,
+		ConfigHash:     configHash,
+		GitSHA:         eval.GitSHA(""),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeErr(c, http.StatusNotFound, "数据集不存在")
+		case strings.Contains(err.Error(), "没有用例"):
+			writeErr(c, http.StatusBadRequest, err.Error())
+		default:
+			log.Printf("create run: %v", err)
+			writeErr(c, http.StatusInternalServerError, "提交任务失败")
+		}
+		return
+	}
+
+	writeJSON(c, http.StatusCreated, gin.H{
+		"run_id":        ref.RunID,
+		"job_id":        ref.JobID,
+		"items":         ref.Items,
+		"status":        "pending",
+		"top_k":         req.TopK,
+		"config_hash":   configHash,
+		"chunking_hash": chunkingHash,
+		"collection":    eval.CollectionName(req.CorpusID, chunkingHash),
 	})
 }

@@ -24,6 +24,12 @@ type stubRunStore struct {
 	gotLimit     int
 	gotRunID     int64
 	gotFlagged   bool
+	// M3: 任务提交相关
+	projectID      int64
+	projectErr     error
+	createErr      error
+	createRef      store.RunJobRef
+	gotCreateInput *store.CreateRunInput
 }
 
 func (s *stubRunStore) ListRuns(_ context.Context, datasetID, projectID int64, limit int) ([]store.Run, error) {
@@ -208,4 +214,23 @@ func TestReportAggregatesMetricsWorstAndFlags(t *testing.T) {
 	if stub.gotLimit != 2 {
 		t.Fatalf("worst 参数未透传为 limit: %d", stub.gotLimit)
 	}
+}
+
+func (s *stubRunStore) GetDatasetProject(_ context.Context, datasetID int64) (int64, error) {
+	s.gotDatasetID = datasetID
+	if s.projectErr != nil {
+		return 0, s.projectErr
+	}
+	if s.projectID != 0 {
+		return s.projectID, nil
+	}
+	return 1, nil
+}
+
+func (s *stubRunStore) CreateRunWithJob(_ context.Context, in store.CreateRunInput) (store.RunJobRef, error) {
+	s.gotCreateInput = &in
+	if s.createErr != nil {
+		return store.RunJobRef{}, s.createErr
+	}
+	return s.createRef, nil
 }

@@ -89,6 +89,19 @@ func (p *Postgres) DeleteDataset(ctx context.Context, id int64) error {
 	return nil
 }
 
+// GetDatasetProject 取数据集所属项目 id(提交评测任务时用于补全 project_id)。
+func (p *Postgres) GetDatasetProject(ctx context.Context, id int64) (int64, error) {
+	var projectID int64
+	err := p.db.QueryRowContext(ctx, `SELECT project_id FROM datasets WHERE id = $1`, id).Scan(&projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return projectID, nil
+}
+
 // datasetExists 供 case 相关方法校验数据集存在性。
 func (p *Postgres) datasetExists(ctx context.Context, id int64) (bool, error) {
 	var one int
