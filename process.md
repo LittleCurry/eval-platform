@@ -507,7 +507,7 @@ eval-platform/
 > 多数不影响 M0–M1 骨架，但建议尽早定，避免 M2 返工。
 
 1. **语料领域**：~~第一个领域语料选什么？~~ ✅ **已定**：先落地本地 mock 中文语料《知简 CRM》帮助文档体系（`datasets/corpus/`，21 篇 .md，带 doc_id frontmatter 与稳定小标题，虚构产品无版权顾虑）。后续换真实领域语料时保持目录结构替换即可，评测平台代码不感知语料来源。
-2. **LLM/embedding/reranker 供应商与预算**：~~judge 与生成用哪家……~~ ✅ **部分已定**：先接 **DeepSeek**（`https://api.deepseek.com`，OpenAI 兼容；chat=`deepseek-chat`，推理=`deepseek-reasoner`），架构支持多厂商 + 成本/延迟/难度路由（D-D / D11）。**待定：embedding/rerank 供应商**——DeepSeek 无此类接口，M2 检索侧需要第二家（候选：SiliconFlow 的 bge-m3 / 阿里云 text-embedding；rerank 同源可选）。M2 前申请到即可，不影响 M0/M1。
+2. **LLM/embedding/reranker 供应商与预算**：✅ **已定**：生成/judge 用 **DeepSeek**（`https://api.deepseek.com`，OpenAI 兼容；chat=`deepseek-chat`，推理=`deepseek-reasoner`），架构支持多厂商 + 成本/延迟/难度路由（D-D / D11）。**embedding 用 SiliconFlow `BAAI/bge-m3`（维度 1024，已实测连通，直连可用）**，rerank 后续同源可选（如 `BAAI/bge-reranker-v2-m3`）。Key 只放 `.env`（gitignored），`.env.example` 放占位符；如密钥曾在对话/日志出现需轮换。
 3. **是否有现成线上 RAG/Agent 可作 HTTP adapter 的真实被测对象**：有 → 契约按它校准；没有 → M2–M4 先用 builtin 模式，M7 前再接入。
 4. **部署形态**：同事共用是"内网一台机器 docker compose"还是云服务器？影响 M7 部署文档与鉴权强度。
 5. **评测集规模预期**：中期想扩到多少题、是否多领域（决定 datasets/cases 是否需要更重的组织方式）。
