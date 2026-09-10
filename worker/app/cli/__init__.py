@@ -1,0 +1,1 @@
+"""worker CLI 入口集合(通过 python -m app.cli.<name> 调用)。"""

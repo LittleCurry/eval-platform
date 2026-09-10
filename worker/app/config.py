@@ -7,10 +7,12 @@ class Settings(BaseSettings):
     环境变量(同名大写覆盖): PG_DSN / QDRANT_URL / LOG_LEVEL /
     SILICONFLOW_API_KEY / EMBEDDING_BASE_URL / EMBEDDING_MODEL / EMBEDDING_DIM /
     EMBEDDING_BATCH_SIZE / DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL
-    可读取项目根 .env; 测试用 _env_file=None 屏蔽文件影响。
+
+    读取 .env 的顺序: 项目根 ../.env 再 worker/.env(后者优先) —— 这样无论从
+    仓库根还是 worker/ 目录运行 CLI 都能读到同一个 .env。测试用 _env_file=None 屏蔽。
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 
     # 基础设施
     pg_dsn: str = "postgresql://eval:eval_dev_password@localhost:5432/eval_platform"
