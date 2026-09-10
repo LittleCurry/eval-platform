@@ -30,6 +30,18 @@ export const routes: RouteRecordRaw[] = [
                 component: () => import('../views/DatasetDetailView.vue'),
                 meta: { title: '数据集详情' },
             },
+            {
+                path: 'runs',
+                name: 'runs',
+                component: () => import('../views/RunsView.vue'),
+                meta: { title: '运行报告' },
+            },
+            {
+                path: 'runs/:id',
+                name: 'run-detail',
+                component: () => import('../views/RunReportView.vue'),
+                meta: { title: '运行详情' },
+            },
         ],
     },
     {

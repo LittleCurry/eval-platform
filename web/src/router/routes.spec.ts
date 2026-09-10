@@ -23,20 +23,18 @@ function allPaths(): string[] {
 }
 
 describe('路由表', () => {
-    it('包含 home / login / 三个业务页', () => {
+    it('包含 home / login / 各业务页', () => {
         const names = allNames()
-        expect(names).toContain('home')
-        expect(names).toContain('login')
-        expect(names).toContain('corpora')
-        expect(names).toContain('datasets')
-        expect(names).toContain('dataset-detail')
+        for (const expected of ['home', 'login', 'corpora', 'datasets', 'dataset-detail', 'runs', 'run-detail']) {
+            expect(names).toContain(expected)
+        }
     })
 
     it('业务页路由路径正确', () => {
         const paths = allPaths()
-        expect(paths).toContain('/corpora')
-        expect(paths).toContain('/datasets')
-        expect(paths).toContain('/datasets/:id')
+        for (const expected of ['/corpora', '/datasets', '/datasets/:id', '/runs', '/runs/:id']) {
+            expect(paths).toContain(expected)
+        }
     })
 
     it('根路径挂载布局并默认渲染首页', () => {

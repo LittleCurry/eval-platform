@@ -68,3 +68,48 @@ export interface ImportReport {
     imported: number
     errors: CaseImportError[]
 }
+
+// ---- 评测运行(runs / case_results) ----
+
+export type MetricsMap = Record<string, number>
+
+export interface Run {
+    id: number
+    project_id: number
+    dataset_id: number
+    corpus_id?: number
+    status: string
+    config_hash: string
+    git_sha: string
+    metrics: MetricsMap
+    error?: string
+    started_at?: string
+    finished_at?: string
+    created_at: string
+    config_snapshot?: Record<string, unknown>
+}
+
+export interface RetrievedItem {
+    point_id: string
+    doc_id: string
+    score: number
+}
+
+export interface RunCaseResult {
+    case_id: number
+    qid: string
+    question: string
+    difficulty?: string
+    category?: string
+    retrieved: RetrievedItem[]
+    metrics: MetricsMap
+    flags: string[]
+    latency_ms?: number
+}
+
+export interface RunReport {
+    run: Run
+    metrics: MetricsMap
+    worst_cases: RunCaseResult[]
+    flag_counts: Record<string, number>
+}

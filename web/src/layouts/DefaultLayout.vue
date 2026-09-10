@@ -17,11 +17,13 @@ const menuOptions: MenuOption[] = [
   { label: '概览', key: 'home' },
   { label: '语料库', key: 'corpora' },
   { label: '数据集', key: 'datasets' },
+  { label: '运行报告', key: 'runs' },
 ]
 
 const activeKey = computed(() => {
   const name = String(route.name ?? '')
   if (name === 'dataset-detail') return 'datasets'
+  if (name === 'run-detail') return 'runs'
   return name
 })
 
