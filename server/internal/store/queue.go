@@ -157,6 +157,9 @@ func (p *Postgres) ClaimJob(ctx context.Context) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := markRunRunning(ctx, tx, job.RunID); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -362,4 +365,131 @@ func scanJob(scan scanFunc) (Job, error) {
 func (p *Postgres) DeleteRun(ctx context.Context, runID int64) error {
 	_, err := p.db.ExecContext(ctx, `DELETE FROM runs WHERE id = $1`, runID)
 	return err
+}
+
+// ClaimJobByID 领取指定任务(用于接管后重跑/调试); 任务不在 pending 状态时返回 nil。
+func (p *Postgres) ClaimJobByID(ctx context.Context, jobID int64) (*Job, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var found int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM jobs WHERE id = $1 AND status = 'pending'
+		FOR UPDATE SKIP LOCKED`, jobID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	row := tx.QueryRowContext(ctx, `
+		UPDATE jobs
+		SET status = 'running', heartbeat_at = now(), updated_at = now()
+		WHERE id = $1
+		RETURNING id, run_id, status, progress::text, heartbeat_at,
+		          COALESCE(error, ''), created_at, updated_at`, jobID)
+	job, err := scanJob(row.Scan)
+	if err != nil {
+		return nil, err
+	}
+	if err := markRunRunning(ctx, tx, job.RunID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+// markRunRunning 任务被领取 = 实验开始执行: run 置 running 并记录 started_at。
+func markRunRunning(ctx context.Context, tx *sql.Tx, runID int64) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'running',
+		    started_at = COALESCE(started_at, now()),
+		    updated_at = now()
+		WHERE id = $1 AND status IN ('pending', 'running')`, runID)
+	return err
+}
+
+// ReclaimResult 描述一次"僵尸任务接管"的结果。
+type ReclaimResult struct {
+	Jobs  int   `json:"jobs"`
+	Items int64 `json:"items"`
+}
+
+// ReclaimStaleJobs 接管心跳超时的任务(M3 中断恢复的关键):
+// 把 running 且心跳早于 olderThanSeconds 的任务, 其 running 微任务放回 pending, 任务也回到 pending,
+// 由任意 worker 重新领取并从断点继续。
+//
+// 安全性: 仍然使用 FOR UPDATE SKIP LOCKED, 正在心跳的活跃任务不会被误接管。
+func (p *Postgres) ReclaimStaleJobs(ctx context.Context, olderThanSeconds float64) (ReclaimResult, error) {
+	var result ReclaimResult
+
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM jobs
+		WHERE status = 'running'
+		  AND (heartbeat_at IS NULL
+		       OR heartbeat_at < now() - make_interval(secs => $1::double precision))
+		ORDER BY id
+		FOR UPDATE SKIP LOCKED`, olderThanSeconds)
+	if err != nil {
+		return result, err
+	}
+	var jobIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return result, err
+		}
+		jobIDs = append(jobIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return result, err
+	}
+	if len(jobIDs) == 0 {
+		return result, nil
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE job_items
+		SET status = 'pending', updated_at = now()
+		WHERE job_id = ANY($1) AND status = 'running'`, jobIDs)
+	if err != nil {
+		return result, err
+	}
+	result.Items, err = res.RowsAffected()
+	if err != nil {
+		return result, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'pending', error = '心跳超时被接管(worker 可能被强杀)', updated_at = now()
+		WHERE id = ANY($1)`, jobIDs); err != nil {
+		return result, err
+	}
+	for _, jobID := range jobIDs {
+		if _, err := tx.ExecContext(ctx, progressSQL, jobID); err != nil {
+			return result, err
+		}
+	}
+	result.Jobs = len(jobIDs)
+
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	return result, nil
 }

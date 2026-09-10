@@ -2,7 +2,7 @@
 
 设计要点:
 - 每条 case 由 queue.complete_item 原子提交(结果 + 微任务状态 + 进度); 中断只丢当前一条;
-- 心跳按周期刷新, M3-3 起用于识别并接管僵尸任务;
+- 心跳按周期刷新; 心跳超时的任务由 reclaim_stale_jobs 接管(常驻模式周期自动执行);
 - 支持 max_items 提前停止(测试/灰度): 未跑的微任务放回 pending, 任务也放回队列,
   下一次 run_once 从断点继续 —— 这就是"中断续跑"。
 """
@@ -29,6 +29,7 @@ from app.queue import (
     heartbeat,
     job_progress,
     list_case_metric_rows,
+    reclaim_stale_jobs,
     release_items,
     release_job,
     update_run_metrics,
@@ -59,6 +60,9 @@ class RunnerOptions:
     heartbeat_seconds: float = 10.0
     poll_interval: float = 1.0
     max_items: int | None = None
+    stale_timeout_seconds: float = 60.0
+    reclaim_every_polls: int = 10
+    batch_pause_ms: float = 0.0  # 批次间暂停(故障演练/模拟慢 LLM 用)
 
 
 @dataclass
@@ -114,11 +118,22 @@ class QueueRunner:
             return None
         return self.execute_job(job)
 
+    def reclaim_stale(self) -> Any:
+        """接管心跳超时的僵尸任务(被强杀的 worker 留下的 running 任务)。"""
+        result = reclaim_stale_jobs(self.dsn, self.options.stale_timeout_seconds)
+        if result.jobs:
+            self.log.warning("stale_jobs_reclaimed", jobs=result.jobs, items=result.items)
+        return result
+
     def run_forever(self) -> None:
-        """常驻模式: 轮询领任务, 空闲时按 poll_interval 休眠。"""
+        """常驻模式: 轮询领任务 + 周期性接管僵尸任务。"""
+        idle_polls = 0
         while not self._stop_requested:
             summary = self.run_once()
             if summary is None:
+                idle_polls += 1
+                if idle_polls % max(1, self.options.reclaim_every_polls) == 0:
+                    self.reclaim_stale()
                 time.sleep(self.options.poll_interval)
 
     # ---- 内部 ----
@@ -188,6 +203,8 @@ class QueueRunner:
                 succeeded += success_count
                 dead += dead_count
                 processed += len(todo)
+                if self.options.batch_pause_ms > 0:
+                    time.sleep(self.options.batch_pause_ms / 1000.0)
 
             if self._stopped_or_paused(processed):
                 release_job(self.dsn, job.id)

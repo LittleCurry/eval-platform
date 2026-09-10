@@ -4,7 +4,7 @@
 - 领取用 FOR UPDATE SKIP LOCKED -> 多 worker 并发安全, 不会领到同一条;
 - checkpoint = 每条 case 一个事务(写 case_results + 推进 job_items + 刷新进度一起提交),
   所以 worker 崩在任意时刻, 已完成的 case 不会重算;
-- 心跳用于识别僵尸任务(M3-3 的接管逻辑依据)。
+- 心跳用于识别僵尸任务(M3-3 的接管逻辑依据): 心跳超时的 running 任务会被接管回 pending。
 """
 from __future__ import annotations
 
@@ -44,6 +44,14 @@ class ClaimedItem:
     job_id: int
     case_id: int
     retry_count: int
+
+
+@dataclass(frozen=True)
+class ReclaimResult:
+    """一次"僵尸任务接管"的结果。"""
+
+    jobs: int
+    items: int
 
 
 @dataclass(frozen=True)
@@ -266,6 +274,52 @@ def job_progress(dsn: str, job_id: int) -> dict[str, int]:
         "failed": failed,
         "total": pending + running + succeeded + failed,
     }
+
+
+def reclaim_stale_jobs(dsn: str, timeout_seconds: float = 60.0) -> ReclaimResult:
+    """接管心跳超时的任务(worker 被强杀的场景)。
+
+    把 running 且心跳早于 timeout_seconds 的任务: running 微任务放回 pending, 任务回到 pending,
+    从而被任意 worker 重新领取并从断点继续。仍用 SKIP LOCKED, 活跃任务不会被误接管。
+    """
+    with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id FROM jobs
+            WHERE status = 'running'
+              AND (heartbeat_at IS NULL
+                OR heartbeat_at < now() - make_interval(secs => %s::double precision))
+            ORDER BY id
+                FOR UPDATE SKIP LOCKED
+            """,
+            (timeout_seconds,),
+        )
+        job_ids = [row[0] for row in cur.fetchall()]
+        if not job_ids:
+            return ReclaimResult(jobs=0, items=0)
+
+        cur.execute(
+            """
+            UPDATE job_items
+            SET status = 'pending', updated_at = now()
+            WHERE job_id = ANY(%s) AND status = 'running'
+            """,
+            (job_ids,),
+        )
+        released = cur.rowcount
+        cur.execute(
+            """
+            UPDATE jobs
+            SET status = 'pending',
+                error = '心跳超时被接管(worker 可能被强杀)',
+                updated_at = now()
+            WHERE id = ANY(%s)
+            """,
+            (job_ids,),
+        )
+        for job_id in job_ids:
+            cur.execute(PROGRESS_SQL, (job_id, job_id))
+    return ReclaimResult(jobs=len(job_ids), items=released)
 
 
 def get_run_context(dsn: str, run_id: int) -> RunContext:

@@ -52,4 +52,5 @@ type RunStore interface {
 	// 任务编排(M3)
 	GetDatasetProject(ctx context.Context, datasetID int64) (int64, error)
 	CreateRunWithJob(ctx context.Context, in store.CreateRunInput) (store.RunJobRef, error)
+	ReclaimStaleJobs(ctx context.Context, olderThanSeconds float64) (store.ReclaimResult, error)
 }

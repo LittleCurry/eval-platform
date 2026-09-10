@@ -1,10 +1,11 @@
 """CLI: 评测 worker(队列消费者)。
 
 用法:
-    python -m app.cli.worker                       # 常驻, 轮询领任务
+    python -m app.cli.worker                       # 常驻, 轮询领任务(并周期性接管僵尸任务)
     python -m app.cli.worker --once                # 只领一个任务并跑完(验证用)
     python -m app.cli.worker --once --job-id 19    # 只跑指定任务(重跑/调试)
     python -m app.cli.worker --once --max-items 5  # 只跑 5 条, 其余放回队列(验证续跑)
+    python -m app.cli.worker --reclaim-once        # 只做一次僵尸任务接管(运维/演练)
 
 输出: 每个任务的 JSON 摘要(含 processed/succeeded/failed/elapsed_ms)。
 """
@@ -29,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-retries", type=int, default=3, help="单条用例最大重试次数")
     parser.add_argument("--poll-interval", type=float, default=1.0, help="空闲轮询间隔(秒)")
     parser.add_argument("--heartbeat-seconds", type=float, default=10.0, help="心跳刷新间隔(秒)")
+    parser.add_argument(
+        "--stale-timeout", type=float, default=60.0,
+        help="僵尸任务判定阈值(秒): 心跳早于该值的 running 任务会被接管",
+    )
+    parser.add_argument("--reclaim-once", action="store_true", help="只执行一次僵尸任务接管后退出")
+    parser.add_argument("--batch-pause-ms", type=float, default=0.0, help="批次间暂停毫秒数(演练用)")
     return parser
 
 
@@ -43,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
         heartbeat_seconds=args.heartbeat_seconds,
         poll_interval=args.poll_interval,
         max_items=args.max_items or None,
+        stale_timeout_seconds=args.stale_timeout,
+        batch_pause_ms=args.batch_pause_ms,
     )
     runner = QueueRunner(settings, options)
 
@@ -52,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
+
+    if args.reclaim_once:
+        result = runner.reclaim_stale()
+        print(json.dumps({"jobs": result.jobs, "items": result.items}, ensure_ascii=False))
+        return 0
 
     if args.once:
         summary = runner.run_once(args.job_id or None)

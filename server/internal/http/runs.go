@@ -275,3 +275,30 @@ func (h *runHandler) Submit(c *gin.Context) {
 		"collection":    eval.CollectionName(req.CorpusID, chunkingHash),
 	})
 }
+
+// Reclaim POST /jobs/reclaim?older_than_seconds=60
+// 接管"心跳超时"的僵尸任务(worker 被强杀的场景): 其 running 微任务放回 pending, 任务回队列。
+// 运维/故障演练入口; 常驻 worker 也会周期性自动调用。
+func (h *runHandler) Reclaim(c *gin.Context) {
+	olderThan := 60.0
+	if raw := c.Query("older_than_seconds"); raw != "" {
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil || value < 0 {
+			writeErr(c, http.StatusBadRequest, "older_than_seconds 必须是非负数字")
+			return
+		}
+		olderThan = value
+	}
+
+	result, err := h.store.ReclaimStaleJobs(c.Request.Context(), olderThan)
+	if err != nil {
+		log.Printf("reclaim stale jobs: %v", err)
+		writeErr(c, http.StatusInternalServerError, "接管失败")
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{
+		"jobs":               result.Jobs,
+		"items":              result.Items,
+		"older_than_seconds": olderThan,
+	})
+}

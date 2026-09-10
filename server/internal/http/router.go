@@ -59,6 +59,7 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.GET("/cases/:id", cases.Get)
 	v1.DELETE("/cases/:id", cases.Delete)
 	v1.POST("/runs", runs.Submit)
+	v1.POST("/jobs/reclaim", runs.Reclaim)
 	v1.GET("/runs", runs.List)
 	v1.GET("/runs/:id", runs.Get)
 	v1.GET("/runs/:id/case-results", runs.CaseResults)

@@ -238,3 +238,105 @@ func TestQueueClaimWhenEmptyLive(t *testing.T) {
 	}
 	t.Fatal("连续领取 50 次仍未出现空队列, 可能有任务泄漏")
 }
+
+// ---- M3-3: 僵尸任务接管(kill -9 恢复) ----
+
+func TestReclaimStaleJobAndResumeLive(t *testing.T) {
+	pg := livePostgres(t)
+	ctx := context.Background()
+
+	ref, _ := newLiveRun(t, pg)
+	job, err := pg.ClaimJob(ctx)
+	if err != nil || job == nil {
+		t.Fatalf("领取任务失败: %v", err)
+	}
+	if job.ID != ref.JobID {
+		t.Skip("队列中存在其他 pending 任务, 跳过本条(避免误接管他人任务)")
+	}
+
+	items, err := pg.ClaimJobItems(ctx, ref.JobID, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("应领到 3 条, 实际 %d", len(items))
+	}
+	if err := pg.CompleteJobItem(ctx, ref.JobID, items[0].ID, ref.RunID, CaseResultRow{
+		CaseID: items[0].CaseID, Retrieved: []map[string]any{}, Metrics: map[string]any{"recall": 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟 worker 被 kill -9: 心跳停在过去(而非等待真实超时)
+	if _, err := pg.db.ExecContext(ctx,
+		`UPDATE jobs SET heartbeat_at = now() - interval '10 minutes' WHERE id = $1`, ref.JobID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 活跃任务不应被接管(阈值 1 小时 > 心跳年龄 10 分钟)
+	result, err := pg.ReclaimStaleJobs(ctx, 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Jobs != 0 {
+		t.Fatalf("阈值大于心跳年龄时不应接管, 实际 %+v", result)
+	}
+
+	// 阈值放开后被接管: running 微任务回到 pending, 任务回到 pending
+	result, err = pg.ReclaimStaleJobs(ctx, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Jobs == 0 {
+		t.Fatal("心跳超时任务应被接管")
+	}
+	progress, err := pg.JobProgress(ctx, ref.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress["running"] != 0 {
+		t.Fatalf("接管后不应残留 running 微任务: %+v", progress)
+	}
+	if progress["succeeded"] != 1 || int64(progress["pending"]) != ref.Items-1 {
+		t.Fatalf("接管后进度不符(已完成的必须保留): %+v", progress)
+	}
+	job2, err := pg.ClaimJobByID(ctx, ref.JobID)
+	if err != nil || job2 == nil {
+		t.Fatalf("被接管的任务应可重新领取: %v", err)
+	}
+	if job2.Status != "running" {
+		t.Fatalf("重新领取后状态应为 running: %+v", job2)
+	}
+}
+
+func TestReclaimLeavesFreshJobAloneLive(t *testing.T) {
+	pg := livePostgres(t)
+	ctx := context.Background()
+
+	ref, _ := newLiveRun(t, pg)
+	job, err := pg.ClaimJob(ctx)
+	if err != nil || job == nil {
+		t.Fatalf("领取任务失败: %v", err)
+	}
+	if job.ID != ref.JobID {
+		t.Skip("队列中存在其他 pending 任务, 跳过本条")
+	}
+	if err := pg.HeartbeatJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := pg.ReclaimStaleJobs(ctx, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Jobs != 0 {
+		t.Fatalf("刚心跳过的任务不应被接管: %+v", result)
+	}
+	still, err := pg.GetRun(ctx, ref.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if still.Status != "running" {
+		t.Fatalf("活跃任务的 run 应保持 running: %s", still.Status)
+	}
+}

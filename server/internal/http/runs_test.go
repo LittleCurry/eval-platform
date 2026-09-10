@@ -30,6 +30,11 @@ type stubRunStore struct {
 	createErr      error
 	createRef      store.RunJobRef
 	gotCreateInput *store.CreateRunInput
+	// M3-3: 僵尸任务接管
+	reclaimErr       error
+	reclaimResult    store.ReclaimResult
+	gotOlderThan     float64
+	reclaimCallCount int
 }
 
 func (s *stubRunStore) ListRuns(_ context.Context, datasetID, projectID int64, limit int) ([]store.Run, error) {
@@ -233,4 +238,13 @@ func (s *stubRunStore) CreateRunWithJob(_ context.Context, in store.CreateRunInp
 		return store.RunJobRef{}, s.createErr
 	}
 	return s.createRef, nil
+}
+
+func (s *stubRunStore) ReclaimStaleJobs(_ context.Context, olderThanSeconds float64) (store.ReclaimResult, error) {
+	s.reclaimCallCount++
+	s.gotOlderThan = olderThanSeconds
+	if s.reclaimErr != nil {
+		return store.ReclaimResult{}, s.reclaimErr
+	}
+	return s.reclaimResult, nil
 }
