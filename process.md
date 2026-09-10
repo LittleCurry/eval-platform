@@ -346,18 +346,26 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 
 > 全项目第一个"出数"的里程碑。不碰 LLM，纯检索 + 确定性指标，先建立可信基线。
 
-**任务清单**
-- [ ] Qdrant collection 管理：按 (语料, chunking_hash) 命名/隔离；payload 存 doc_id/span 映射/chunk 文本
-- [ ] chunker（内置实现，含"按标题层级/段落/固定大小"等策略）+ chunking_hash 记录（D7）
-- [ ] embedding 供应商接入（OpenAI 兼容封装，先接一个，见 §9）
-- [ ] 锚点映射器：gold anchor 区间 → 当前 chunk 集合 `G`（D1），含映射失败校验
-- [ ] 检索器：top-k 查询 + 可选手工 rerank（M2 先不做 reranker 也 OK）
-- [ ] **最简评测 runner**（先同步跑通，M3 再异步化）：对每题取 `Rk`，算 Recall@k/Precision@k/MRR@k/Hit@k（口径 §D10）
-- [ ] runs/jobs/job_items/case_results 表落地 + 结果落库（为 M3 打底）
-- [ ] 报告 API + 前端报告页雏形：指标卡片 + 每题明细表
-- [ ] Python 侧指标计算单元测试（构造小样例手算核对）+ chunker/锚点映射测试
+**任务清单**（✅ 2026-09-10 完成；M2-7 拆为 Go 报告 API + 前端报告页两张卡）
+- [x] Qdrant collection 管理：按 (语料, chunking_hash) 命名/隔离；payload 存 doc_id/span 映射/chunk 文本
+- [x] chunker（内置实现，含"按标题层级/段落/固定大小"等策略）+ chunking_hash 记录（D7）
+- [x] embedding 供应商接入（OpenAI 兼容封装，先接一个，见 §9）
+- [x] 锚点映射器：gold anchor 区间 → 当前 chunk 集合 `G`（D1），含映射失败校验
+- [x] 检索器：top-k 查询 + 可选手工 rerank（M2 先不做 reranker 也 OK）
+- [x] **最简评测 runner**（先同步跑通，M3 再异步化）：对每题取 `Rk`，算 Recall@k/Precision@k/MRR@k/Hit@k（口径 §D10）
+- [x] runs/jobs/job_items/case_results 表落地 + 结果落库（为 M3 打底）
+- [x] 报告 API + 前端报告页雏形：指标卡片 + 每题明细表
+- [x] Python 侧指标计算单元测试（构造小样例手算核对）+ chunker/锚点映射测试
 
 **验收标准**：用评测集跑出可信指标；**换一个明显更差的检索配置（如 top_k=1）指标随之下降** —— 证明系统"能测出好坏"，这一步是简历 demo 的起点。
+
+> **M2 基线数据（写进 README 与简历）**：
+> - 语料 21 篇 → headings 切分（chunk_size=500/overlap=50/min_chars=80）→ **80 chunks**，指纹 `chunking_hash=5f45e034…`，collection `corpus4_5f45e034`
+> - 评测集 30 题，gold 锚点映射覆盖率 **100%**（平均 1.37 个 gold chunk/题）
+> - 基线与配置：`bge-m3`(1024 维) + top_k=5 → **Recall@5 91.4% / Precision@5 22.0% / MRR@5 83.4% / Hit@5 100%**
+> - 落库样例：run #3（`config_hash=b6598ed9…`, `git_sha=1dbf358`, 30 条 case_results）
+> - 已能区分三类问题：召回不全（zjc-026 recall 0.25）、排序靠后（zjc-027 命中但排第 5）、跨文档干扰（zjc-014）
+> - 待验证的对比实验（M5）：top_k=1/20、fixed 切分、开 reranker —— 用于证明"指标能测出好坏"
 
 ---
 
