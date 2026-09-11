@@ -53,4 +53,6 @@ type RunStore interface {
 	GetDatasetProject(ctx context.Context, datasetID int64) (int64, error)
 	CreateRunWithJob(ctx context.Context, in store.CreateRunInput) (store.RunJobRef, error)
 	ReclaimStaleJobs(ctx context.Context, olderThanSeconds float64) (store.ReclaimResult, error)
+	GetJobByRun(ctx context.Context, runID int64) (*store.Job, error)
+	JobProgress(ctx context.Context, jobID int64) (map[string]int, error)
 }

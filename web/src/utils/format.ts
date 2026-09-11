@@ -62,3 +62,17 @@ export function formatDateTime(value: string | undefined | null): string {
     const pad = (n: number) => String(n).padStart(2, '0')
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
+
+/** 进度文案: (12, 30) -> "12/30" */
+export function formatProgress(done: number | undefined, total: number | undefined): string {
+    if (total === undefined || total <= 0) return '—'
+    const safeDone = Math.min(Math.max(done ?? 0, 0), total)
+    return `${safeDone}/${total}`
+}
+
+/** 进度百分比(0~100, 保留一位小数), 用于 NProgress */
+export function progressPercent(done: number | undefined, total: number | undefined): number {
+    if (!total || total <= 0) return 0
+    const ratio = ((done ?? 0) / total) * 100
+    return Math.max(0, Math.min(100, Math.round(ratio * 10) / 10))
+}

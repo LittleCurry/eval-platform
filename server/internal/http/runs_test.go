@@ -35,6 +35,11 @@ type stubRunStore struct {
 	reclaimResult    store.ReclaimResult
 	gotOlderThan     float64
 	reclaimCallCount int
+	// M3-4: 进度查询
+	job         *store.Job
+	jobErr      error
+	gotJobRunID int64
+	jobProgress map[string]int
 }
 
 func (s *stubRunStore) ListRuns(_ context.Context, datasetID, projectID int64, limit int) ([]store.Run, error) {
@@ -247,4 +252,19 @@ func (s *stubRunStore) ReclaimStaleJobs(_ context.Context, olderThanSeconds floa
 		return store.ReclaimResult{}, s.reclaimErr
 	}
 	return s.reclaimResult, nil
+}
+
+func (s *stubRunStore) GetJobByRun(_ context.Context, runID int64) (*store.Job, error) {
+	s.gotJobRunID = runID
+	if s.jobErr != nil {
+		return nil, s.jobErr
+	}
+	return s.job, nil
+}
+
+func (s *stubRunStore) JobProgress(_ context.Context, jobID int64) (map[string]int, error) {
+	if s.jobProgress != nil {
+		return s.jobProgress, nil
+	}
+	return map[string]int{"pending": 30, "running": 0, "succeeded": 0, "failed": 0, "total": 30}, nil
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -16,19 +16,22 @@ import {
   NGrid,
   NList,
   NListItem,
+  NProgress,
   NSpace,
   NStatistic,
   NSwitch,
   NTag,
   NText,
 } from 'naive-ui'
-import { getRunCaseResults, getRunReport } from '../api/runs'
-import type { RunCaseResult, RunReport } from '../api/types'
+import { getRunCaseResults, getRunProgress, getRunReport } from '../api/runs'
+import type { RunCaseResult, RunProgress, RunReport } from '../api/types'
 import {
   difficultyTagType,
   formatDateTime,
   formatPercent,
+  formatProgress,
   formatScore,
+  progressPercent,
   shortHash,
   statusLabel,
   statusTagType,
@@ -39,15 +42,29 @@ const message = useMessage()
 const runId = computed(() => Number(route.params.id))
 
 const report = ref<RunReport | null>(null)
+const progressInfo = ref<RunProgress | null>(null)
 const caseResults = ref<RunCaseResult[]>([])
 const loading = ref(false)
 const errorText = ref('')
 const flaggedOnly = ref(false)
 const detail = ref<RunCaseResult | null>(null)
 const showDetail = ref(false)
+const autoRefresh = ref(true)
+
+const POLL_INTERVAL_MS = 3000
+let timer: number | undefined
+
+const isActive = computed(() => {
+  const status = progressInfo.value?.status ?? report.value?.run.status
+  return status === 'pending' || status === 'running'
+})
 
 async function loadCases() {
   caseResults.value = await getRunCaseResults(runId.value, { limit: 200, flaggedOnly: flaggedOnly.value })
+}
+
+async function loadProgress() {
+  progressInfo.value = await getRunProgress(runId.value)
 }
 
 async function loadAll() {
@@ -55,14 +72,31 @@ async function loadAll() {
   errorText.value = ''
   try {
     report.value = await getRunReport(runId.value, 10)
-    await loadCases()
+    await Promise.all([loadCases(), loadProgress()])
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : String(err)
   } finally {
     loading.value = false
   }
 }
-onMounted(loadAll)
+
+onMounted(async () => {
+  await loadAll()
+  timer = window.setInterval(async () => {
+    if (!autoRefresh.value || !isActive.value) return
+    try {
+      await loadProgress()
+      // 完成后补一次全量(指标/明细随之更新)
+      if (!isActive.value) report.value = await getRunReport(runId.value, 10)
+    } catch {
+      // 轮询失败不打断页面, 等下一轮
+    }
+  }, POLL_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (timer !== undefined) window.clearInterval(timer)
+})
 
 async function toggleFlagged(value: boolean) {
   flaggedOnly.value = value
@@ -104,6 +138,23 @@ const embeddingText = computed(() => {
 })
 
 const flagEntries = computed(() => Object.entries(report.value?.flag_counts ?? {}))
+
+const progressDone = computed(() => {
+  const p = progressInfo.value?.job?.progress
+  if (!p) return 0
+  return p.succeeded + p.failed
+})
+
+const progressTotal = computed(() => progressInfo.value?.job?.progress.total ?? 0)
+
+const progressLabel = computed(() => {
+  const p = progressInfo.value?.job?.progress
+  if (!p) return '无队列任务'
+  const parts = [`成功 ${p.succeeded}`, `失败 ${p.failed}`]
+  if (p.running) parts.push(`进行中 ${p.running}`)
+  if (p.pending) parts.push(`待跑 ${p.pending}`)
+  return parts.join(' · ')
+})
 
 const worstColumns: DataTableColumns<RunCaseResult> = [
   { title: 'qid', key: 'qid', width: 110 },
@@ -183,14 +234,40 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
 
 <template>
   <div>
-    <NCard :title="report ? `运行报告 · run #${report.run.id}` : '运行报告'" style="margin-bottom: 16px">
+    <NCard title="任务进度" style="margin-bottom: 16px">
       <template #header-extra>
         <NSpace align="center">
-          <NTag :type="statusTagType(report?.run.status)">
-            {{ statusLabel(report?.run.status) }}
-          </NTag>
+          <NTag v-if="isActive && autoRefresh" size="small" type="info">自动刷新中</NTag>
+          <NSpace align="center" :size="4">
+            <NText depth="3" style="font-size: 12px">自动刷新</NText>
+            <NSwitch v-model:value="autoRefresh" size="small" />
+          </NSpace>
           <NButton size="small" :loading="loading" @click="loadAll">刷新</NButton>
         </NSpace>
+      </template>
+
+      <NProgress
+          type="line"
+          :percentage="progressPercent(progressDone, progressTotal)"
+          :height="10"
+          :status="progressInfo?.job && progressInfo.job.progress.failed > 0 ? 'error' : 'default'"
+      />
+      <NSpace align="center" style="margin-top: 10px">
+        <NText>
+          {{ formatProgress(progressDone, progressTotal) }} · {{ progressLabel }}
+        </NText>
+        <NTag v-if="progressInfo?.stale" size="small" type="error">疑似 worker 掉线, 可触发接管</NTag>
+        <NText depth="3" style="font-size: 12px">
+          最近心跳: {{ formatDateTime(progressInfo?.job?.heartbeat_at) }}
+        </NText>
+      </NSpace>
+    </NCard>
+
+    <NCard :title="report ? `运行报告 · run #${report.run.id}` : '运行报告'" style="margin-bottom: 16px">
+      <template #header-extra>
+        <NTag :type="statusTagType(report?.run.status)">
+          {{ statusLabel(report?.run.status) }}
+        </NTag>
       </template>
 
       <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">

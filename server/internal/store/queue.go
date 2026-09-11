@@ -76,6 +76,16 @@ func (p *Postgres) CreateRunWithJob(ctx context.Context, in CreateRunInput) (Run
 		return ref, ErrNotFound
 	}
 
+	// 先数用例: 为空直接拒绝; 非空则用它初始化 job.progress(前端一创建就能看到 0/N)
+	var caseCount int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM cases WHERE dataset_id = $1`, in.DatasetID).Scan(&caseCount); err != nil {
+		return ref, err
+	}
+	if caseCount == 0 {
+		return ref, errors.New("评测集没有用例, 无法提交任务")
+	}
+
 	snapshotJSON, err := json.Marshal(in.ConfigSnapshot)
 	if err != nil {
 		return ref, err
@@ -96,8 +106,9 @@ func (p *Postgres) CreateRunWithJob(ctx context.Context, in CreateRunInput) (Run
 
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO jobs (run_id, status, progress)
-		VALUES ($1, 'pending', '{}'::jsonb)
-		RETURNING id`, ref.RunID,
+		VALUES ($1, 'pending', jsonb_build_object(
+			'pending', $2::int, 'running', 0, 'succeeded', 0, 'failed', 0, 'total', $2::int))
+		RETURNING id`, ref.RunID, caseCount,
 	).Scan(&ref.JobID); err != nil {
 		return ref, err
 	}
@@ -113,8 +124,8 @@ func (p *Postgres) CreateRunWithJob(ctx context.Context, in CreateRunInput) (Run
 	if err != nil {
 		return ref, err
 	}
-	if ref.Items == 0 {
-		return ref, errors.New("评测集没有用例, 无法提交任务")
+	if ref.Items != caseCount {
+		return ref, errors.New("生成微任务数与用例数不一致, 请重试")
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -492,4 +503,21 @@ func (p *Postgres) ReclaimStaleJobs(ctx context.Context, olderThanSeconds float6
 		return result, err
 	}
 	return result, nil
+}
+
+// GetJobByRun 取某次 run 的最新任务; 该 run 没有队列任务时返回 (nil, nil)
+// (M2 的 CLI 直跑记录就没有 job, 前端据此显示"无队列任务")。
+func (p *Postgres) GetJobByRun(ctx context.Context, runID int64) (*Job, error) {
+	row := p.db.QueryRowContext(ctx, `
+		SELECT id, run_id, status, progress::text, heartbeat_at,
+		       COALESCE(error, ''), created_at, updated_at
+		FROM jobs WHERE run_id = $1 ORDER BY id DESC LIMIT 1`, runID)
+	job, err := scanJob(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
 }

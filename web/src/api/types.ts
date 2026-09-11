@@ -113,3 +113,32 @@ export interface RunReport {
     worst_cases: RunCaseResult[]
     flag_counts: Record<string, number>
 }
+
+// ---- 任务进度(jobs) ----
+
+export interface JobProgress {
+    pending: number
+    running: number
+    succeeded: number
+    failed: number
+    total: number
+}
+
+export interface Job {
+    id: number
+    run_id: number
+    status: string
+    progress: JobProgress
+    heartbeat_at?: string
+    error?: string
+    created_at?: string
+    updated_at?: string
+}
+
+export interface RunProgress {
+    run_id: number
+    status: string
+    job: Job | null
+    stale: boolean
+    stale_after_seconds: number
+}

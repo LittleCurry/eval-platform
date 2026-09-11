@@ -3,7 +3,9 @@ import {
     difficultyTagType,
     formatDateTime,
     formatPercent,
+    formatProgress,
     formatScore,
+    progressPercent,
     shortHash,
     statusLabel,
     statusTagType,
@@ -68,5 +70,41 @@ describe('formatDateTime', () => {
     it('非法/缺失值兜底', () => {
         expect(formatDateTime(undefined)).toBe('—')
         expect(formatDateTime('not-a-date')).toBe('not-a-date')
+    })
+})
+
+describe('formatProgress', () => {
+    it('输出 已完成/总数 文案', () => {
+        expect(formatProgress(12, 30)).toBe('12/30')
+        expect(formatProgress(0, 30)).toBe('0/30')
+        expect(formatProgress(30, 30)).toBe('30/30')
+    })
+
+    it('缺失或非法总数显示占位符', () => {
+        expect(formatProgress(1, undefined)).toBe('—')
+        expect(formatProgress(1, 0)).toBe('—')
+    })
+
+    it('已完成数会被夹在 [0, total] 区间内', () => {
+        expect(formatProgress(35, 30)).toBe('30/30')
+        expect(formatProgress(-1, 30)).toBe('0/30')
+    })
+})
+
+describe('progressPercent', () => {
+    it('换算成 0~100 的百分比', () => {
+        expect(progressPercent(12, 30)).toBe(40)
+        expect(progressPercent(30, 30)).toBe(100)
+        expect(progressPercent(1, 3)).toBe(33.3)
+    })
+
+    it('无总数时返回 0', () => {
+        expect(progressPercent(5, 0)).toBe(0)
+        expect(progressPercent(5, undefined)).toBe(0)
+    })
+
+    it('不超出 0~100', () => {
+        expect(progressPercent(99, 30)).toBe(100)
+        expect(progressPercent(-5, 30)).toBe(0)
     })
 })

@@ -1,5 +1,5 @@
 import { http } from './client'
-import type { Run, RunCaseResult, RunReport } from './types'
+import type { Run, RunCaseResult, RunProgress, RunReport } from './types'
 
 export interface ListRunsParams {
     datasetId?: number
@@ -33,4 +33,9 @@ export function getRunCaseResults(
 
 export function getRunReport(id: number, worst = 10): Promise<RunReport> {
     return http.get(`/runs/${id}/report?worst=${worst}`)
+}
+
+/** 任务进度(含"疑似 worker 掉线"标记), 供进度条与自动刷新使用。 */
+export function getRunProgress(id: number): Promise<RunProgress> {
+    return http.get(`/runs/${id}/progress`)
 }

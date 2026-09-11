@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -300,5 +301,68 @@ func (h *runHandler) Reclaim(c *gin.Context) {
 		"jobs":               result.Jobs,
 		"items":              result.Items,
 		"older_than_seconds": olderThan,
+	})
+}
+
+// staleAfterSeconds 心跳超过该秒数即视为"疑似 worker 掉线"。
+const staleAfterSeconds = 60.0
+
+// Progress GET /runs/:id/progress
+// 供前端展示进度条与"疑似掉线"提示; 没有队列任务的 run(M2 CLI 直跑) 返回 job=null。
+func (h *runHandler) Progress(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+
+	run, err := h.store.GetRun(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(c, http.StatusNotFound, "运行记录不存在")
+			return
+		}
+		log.Printf("get run %d: %v", id, err)
+		writeErr(c, http.StatusInternalServerError, "查询失败")
+		return
+	}
+
+	job, err := h.store.GetJobByRun(ctx, id)
+	if err != nil {
+		log.Printf("get job by run %d: %v", id, err)
+		writeErr(c, http.StatusInternalServerError, "查询失败")
+		return
+	}
+
+	// 兜底: 老任务(或异常路径)可能没有初始化 progress, 用 job_items 实时统计补齐
+	if job != nil {
+		if _, ok := job.Progress["total"]; !ok {
+			if progress, err := h.store.JobProgress(ctx, job.ID); err == nil {
+				job.Progress = map[string]any{
+					"pending": progress["pending"], "running": progress["running"],
+					"succeeded": progress["succeeded"], "failed": progress["failed"],
+					"total": progress["total"],
+				}
+			}
+		}
+	}
+
+	stale := false
+	var jobPayload any
+	if job != nil {
+		jobPayload = job
+		if job.Status == "running" &&
+			(job.HeartbeatAt == nil ||
+				time.Since(*job.HeartbeatAt) > time.Duration(staleAfterSeconds)*time.Second) {
+			stale = true
+		}
+	}
+
+	writeJSON(c, http.StatusOK, gin.H{
+		"run_id":              run.ID,
+		"status":              run.Status,
+		"job":                 jobPayload,
+		"stale":               stale,
+		"stale_after_seconds": staleAfterSeconds,
 	})
 }

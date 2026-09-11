@@ -64,5 +64,6 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.GET("/runs/:id", runs.Get)
 	v1.GET("/runs/:id/case-results", runs.CaseResults)
 	v1.GET("/runs/:id/report", runs.Report)
+	v1.GET("/runs/:id/progress", runs.Progress)
 	return r
 }
