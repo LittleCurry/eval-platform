@@ -1,6 +1,6 @@
 .PHONY: help up-deps down-deps ps api migrate-up migrate-down migrate-version \
         migrate-create worker-setup worker-test worker-lint worker-healthcheck \
-        drill drill-compare compare test lint verify
+        drill drill-compare compare parallel-demo test lint verify
 
 help: ## 显示可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F'## ' '{split($$1, t, ":"); printf "  \033[36m%-18s\033[0m %s\n", t[1], $$2}'
@@ -67,6 +67,9 @@ drill-compare: ## 故障演练 + 与参照 run 逐题比对: make drill-compare 
 
 compare: ## 两次 run 逐题一致性对比: make compare LEFT=100 RIGHT=101
 	cd worker && .venv/bin/python -m app.cli.compare_runs --left $(LEFT) --right $(RIGHT)
+
+parallel-demo: ## 并发演示(两个 job 并行) + 产出 A/B 数据
+	scripts/parallel_jobs_demo.sh
 
 # ---- 全量收口 ----
 test: ## 运行全部单测 (Go + Python + Web)

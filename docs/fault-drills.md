@@ -87,9 +87,10 @@ CLEANUP_RUN=1 scripts/fault_drill.sh                       # 演练后删除本�
 
 ### 已知边界（诚实记录）
 
-1. **单 job 只能被一个 worker 消费**（`jobs.status` 单值守护）：多 worker 的并发粒度是 **job 级**，
-   不是 item 级。要做"多 worker 分食同一 job"需要给 `job_items` 加租约（`worker_id` + 过期时间），
-   触发条件：单 job 题量 > 500 或单 job 时长 > 10 min。
+1. **单 job 只能被一个 worker 消费**（`jobs.status` 单值守护）：并发粒度是 **job 级**（决策 D12），
+   不是 item 级。多 worker 的并行靠"多 job"，见下方"演练 3"。要做"多 worker 分食同一 job"需要给
+   `job_items` 加租约（`worker_id` + 过期时间 + 续租），**触发条件**：单 job 题量 > 500 或单 job 时长 > 10 min。
+   回归防线：Go `TestQueueRunningJobIsNeverClaimedTwiceLive` + `worker/tests/test_concurrency_live.py`（4 条）。
 2. **本脚本的崩溃点常落在批次边界**，此时没有 in-flight 微任务，接管只会回收任务本身
    （`items=0`）。要覆盖"释放 in-flight 微任务"的分支，需让崩溃发生在批次中间：
    调大 `BATCH_SIZE`（如 8）并调小 `BATCH_PAUSE_MS`，或把 `KILL_AFTER` 设在某个批次处理中。
@@ -103,3 +104,39 @@ CLEANUP_RUN=1 scripts/fault_drill.sh                       # 演练后删除本�
 
 计划：向 worker 发 SIGTERM，验证当前批次跑完后进程退出、未完成条目回到 `pending`、
 重启后从断点继续（与 kill -9 的差别是**不需要等心跳超时**）。本演练**尚未执行**，故不在此写期望值。
+
+---
+
+## 演练 3：两个 job 并行（并发粒度 D12）
+
+**要证明什么**：一个 job 只被一个 worker 持有（安全），而**多个 job 可以真正并行**（吞吐），
+两者是同一套机制的正面与反面。
+
+```bash
+scripts/parallel_jobs_demo.sh                 # dataset 4(60 题), top_k=5 vs top_k=1
+TOP_K_A=5 TOP_K_B=3 scripts/parallel_jobs_demo.sh
+CLEANUP_RUN=1 scripts/parallel_jobs_demo.sh   # 跑完清理
+```
+
+### 实测记录
+
+**2026-09-11，dataset 4（v2 60 题），两个 worker 进程各持一个 job**
+
+| 项 | 值 |
+|---|---|
+| 任务 | run **111**（job 100, `top_k=5`）/ run **112**（job 101, `top_k=1`），各 60 条 |
+| 并行观测 | 采样 32 次，**15 次观测到两者同时 running**（首次出现在第 16 次采样） |
+| 结果 | 两者均 `succeeded`，各自跑完 60 条，互不阻塞 |
+| 副作用（白捡的 A/B 数据） | `top_k=5`: recall 0.9486 / precision 0.23 / mrr 0.8839 / hit 1.0；`top_k=1`: recall 0.6736 / precision 0.7833 / mrr 0.7833 / hit 0.7833 |
+| 工具反应 | `compare_runs` 对这两个 run 返回**退出码 2（不可比，属 A/B 场景）**，理由：`config_hash` 不同 |
+
+> `top_k=1` 的真跑结果与"用 run 100 的 top-5 列表离线重算 k=1"完全吻合（recall 0.6736 / mrr 0.7833），
+> 说明指标口径与 k 的截断逻辑一致，可以放心用离线重算做**k 敏感性分析**（不必每次都真跑）。
+
+**并发语义的两条测试防线**：
+
+```bash
+RUN_LIVE=1 go test ./internal/store/ -run 'TestQueueRunningJobIsNeverClaimedTwiceLive|TestQueueConcurrentClaimNoDuplicateLive' -v
+RUN_LIVE=1 worker/.venv/bin/pytest worker/tests/test_concurrency_live.py -v
+```
+

@@ -253,6 +253,20 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 
 ---
 
+### D12 并发粒度 = job 级（一个 job 只能被一个 worker 持有）
+
+**决策**：M3 的并发模型是「**一个 job 一个 worker，多 job 并行**」，不做「多 worker 分食同一 job」。语义由 `jobs.status` 单值守护 + `SELECT … FOR UPDATE SKIP LOCKED` 保证：领取即置 `running`，之后任何领取路径（按 id 或泛化）都拿不到它。
+
+- **为什么这样定**：checkpoint 的正确性依赖"这个 job 只有一个写者"。若允许多 worker 分食，就必须给 `job_items` 加 `worker_id` + 租约过期 + 续租失败回收，否则会出现两个 worker 各算一遍同一条 case（`job_items` 行数虽不翻倍，但 `case_results` 会重复累加、指标被污染，且**不报错**）。在单 job 题量 ≤ 数百、单 job 时长 ≤ 分钟内时，这个复杂度换不来收益。
+- **并行的正确用法**：一次评测 = 一个 job；要做大吞吐就**并发提交多个 run**（多 job），各自有独立 worker。
+- **可执行断言**（回归防线）：
+  - Go：`TestQueueRunningJobIsNeverClaimedTwiceLive`（已被持有的 job 二次领取返回 nil；4 协程争抢同一 pending job 有且仅有一个成功）、`TestQueueConcurrentClaimNoDuplicateLive`（多 job 并发领取互不重复）；
+  - worker：`worker/tests/test_concurrency_live.py`（4 条：运行中不可再领、并发争抢唯一胜出、两个 job 可被两个 worker 同时持有、微任务批次不重叠）。
+- **backlog（附触发条件）**：item 级租约（`job_items.worker_id` + 租约过期 + 续租）。**触发条件**：单 job 题量 > 500，或单 job 时长 > 10 min，或需要"大 job 不浪费机器"时再实现。
+- **实测证据**（2026-09-11，`scripts/parallel_jobs_demo.sh`）：两个 run 各 60 题同时提交，两个 worker 进程各持一个 job → 采样 32 次中 **15 次观测到两者同时 running**，两者均 `succeeded`；不同 `top_k` 的两次 run 因 `config_hash` 不同被 `compare_runs` 正确判为"不可比（A/B 场景）"。
+
+---
+
 ## 5. 评测集建设指南（中文自建语料）
 
 > 这是全项目最容易卡、也最不能省的环节。**先小后大**：首个领域 20–50 篇源文档 + 30–100 题即可让 M2 出可信指标，之后迭代扩量。
