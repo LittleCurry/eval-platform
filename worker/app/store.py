@@ -38,6 +38,8 @@ class CaseResultRow:
     metrics: dict[str, Any]
     flags: list[str]
     latency_ms: int | None = None
+    answer: str | None = None
+    generation: dict[str, Any] | None = None
 
 
 # ---- 读 ----
@@ -231,13 +233,15 @@ def save_case_results(dsn: str, run_id: int, rows: Iterable[CaseResultRow]) -> i
         for item in payload:
             cur.execute(
                 """
-                INSERT INTO case_results (run_id, case_id, retrieved, metrics, flags, latency_ms)
-                VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s)
+                INSERT INTO case_results (run_id, case_id, retrieved, metrics, flags, latency_ms, answer, generation)
+                VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)
                     ON CONFLICT (run_id, case_id) DO UPDATE
                                                          SET retrieved  = EXCLUDED.retrieved,
                                                          metrics    = EXCLUDED.metrics,
                                                          flags      = EXCLUDED.flags,
                                                          latency_ms = EXCLUDED.latency_ms,
+                                                         answer     = EXCLUDED.answer,
+                                                         generation = EXCLUDED.generation,
                                                          updated_at = now()
                 """,
                 (
@@ -247,9 +251,38 @@ def save_case_results(dsn: str, run_id: int, rows: Iterable[CaseResultRow]) -> i
                     json.dumps(item.metrics, ensure_ascii=False),
                     json.dumps(item.flags, ensure_ascii=False),
                     item.latency_ms,
+                    item.answer,
+                    json.dumps(item.generation or {}, ensure_ascii=False),
                 ),
             )
     return len(payload)
+
+
+def get_generation_usage(dsn: str, run_id: int) -> dict[str, int]:
+    """汇总该 run 的生成侧用量(答案条数 + token 消耗), 用于写进 run.metrics(D8 成本)。
+
+    续跑场景下也要能算全量, 所以依然从 DB 聚合而不是用内存计数。
+    """
+    with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FILTER (WHERE answer IS NOT NULL AND answer <> '') AS answers,
+                   COALESCE(sum(CASE WHEN generation ? 'prompt_tokens'
+                                     THEN (generation ->> 'prompt_tokens')::int END), 0) AS prompt_tokens,
+                   COALESCE(sum(CASE WHEN generation ? 'completion_tokens'
+                                     THEN (generation ->> 'completion_tokens')::int END), 0) AS completion_tokens
+            FROM case_results
+            WHERE run_id = %s
+            """,
+            (run_id,),
+        )
+        row = cur.fetchone()
+    answers, prompt_tokens, completion_tokens = row if row else (0, 0, 0)
+    return {
+        "answers_generated": int(answers or 0),
+        "prompt_tokens": int(prompt_tokens or 0),
+        "completion_tokens": int(completion_tokens or 0),
+    }
 
 
 def delete_run(dsn: str, run_id: int) -> None:

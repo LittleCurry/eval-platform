@@ -6,6 +6,8 @@
     python -m app.cli.worker --once --job-id 19    # 只跑指定任务(重跑/调试)
     python -m app.cli.worker --once --max-items 5  # 只跑 5 条, 其余放回队列(验证续跑)
     python -m app.cli.worker --reclaim-once        # 只做一次僵尸任务接管(运维/演练)
+    python -m app.cli.worker --once --job-id 12 --generate            # 检索 + 生成(M4)
+    python -m app.cli.worker --once --generate --prompt-id qa_zh_v1   # 指定 prompt 版本
 
 输出: 每个任务的 JSON 摘要(含 processed/succeeded/failed/elapsed_ms)。
 """
@@ -36,12 +38,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reclaim-once", action="store_true", help="只执行一次僵尸任务接管后退出")
     parser.add_argument("--batch-pause-ms", type=float, default=0.0, help="批次间暂停毫秒数(演练用)")
+    # ---- M4: 生成链路 ----
+    parser.add_argument(
+        "--generate", action="store_true",
+        help="检索后调用生成模型产出 answer(默认只跑检索; answer 与生成元信息落 case_results)",
+    )
+    parser.add_argument("--prompt-id", default="qa_zh_v1", help="prompt 资产 id(对应 prompts/<id>.md)")
+    parser.add_argument(
+        "--generation-model", default="",
+        help="覆盖生成模型(默认取 GENERATION_MODEL); 换模型会改变 run 的配置语义, 请配合新 run 使用",
+    )
+    parser.add_argument(
+        "--generation-concurrency", type=int, default=4,
+        help="同批次内并行生成数(实测单题稳态 ~2.4s, 4 并发足够且不易触发限流)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = Settings()
+    if args.generation_model:
+        settings.generation_model = args.generation_model
     setup_logging(settings.log_level)
 
     options = RunnerOptions(
@@ -52,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
         max_items=args.max_items or None,
         stale_timeout_seconds=args.stale_timeout,
         batch_pause_ms=args.batch_pause_ms,
+        generate=args.generate,
+        prompt_id=args.prompt_id,
+        generation_concurrency=args.generation_concurrency,
     )
     runner = QueueRunner(settings, options)
 

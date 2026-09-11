@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
 from app.config import Settings
+from app.generation.builtin import EmptyAnswerError, GenerationResult, SupportsComplete, generate_answer
+from app.generation.prompts import PromptError, PromptTemplate, load_prompt
+from app.llm.client import ChatClient, LLMFatalError, LLMTransientError
 from app.metrics.retrieval import CaseMetric, aggregate, evaluate_case
 from app.queue import (
     ClaimedItem,
@@ -32,13 +36,14 @@ from app.queue import (
     reclaim_stale_jobs,
     release_items,
     release_job,
+    release_running_items,
     update_run_metrics,
 )
 from app.retrieval.anchor import AnchorSpec, GoldCase, map_dataset_cases
 from app.retrieval.chunker import ChunkingConfig, chunk_document, chunking_hash
 from app.retrieval.collections import collection_exists, collection_name
 from app.retrieval.retriever import Retriever
-from app.store import list_cases, list_documents
+from app.store import get_generation_usage, list_cases, list_documents
 
 _CASE_METRIC_FIELDS = (
     "qid",
@@ -63,6 +68,37 @@ class RunnerOptions:
     stale_timeout_seconds: float = 60.0
     reclaim_every_polls: int = 10
     batch_pause_ms: float = 0.0  # 批次间暂停(故障演练/模拟慢 LLM 用)
+    # ---- M4: 生成链路 ----
+    generate: bool = False            # 是否在检索之后调用生成模型产出 answer
+    prompt_id: str = "qa_zh_v1"       # prompts/<id>.md
+    generation_concurrency: int = 4   # 同批次内并行生成数(实测单题稳态 ~2.4s, 4 并发足够且不易触发限流)
+
+
+class GenerationAborted(RuntimeError):
+    """生成侧**致命**错误(鉴权/欠费/prompt 资产非法): 结束整个任务而不是刷 60 条死信。
+
+    为什么必须区分: 402 欠费、401 key 错这类问题重试一万次也一样, 但如果在逐条循环里
+    各自"失败并继续", 结果是 60 次无意义请求 + 60 条死信, 真正的原因被埋在日志里。
+    """
+
+
+@dataclass
+class _GenerationContext:
+    """一次任务内共享的生成依赖(客户端与 prompt 都是线程安全的只读对象)。"""
+
+    client: SupportsComplete
+    prompt: PromptTemplate
+    provider: str
+    base_url: str
+    max_context_chars: int
+    temperature: float
+    max_tokens: int
+    concurrency: int
+
+
+# 单题生成结果标记:
+#   ("ok", GenerationResult) | ("transient", Exception) | ("fatal", Exception) | ("disabled", None)
+GenerationOutcome = tuple[str, Any]
 
 
 @dataclass
@@ -97,6 +133,8 @@ class QueueRunner:
             *,
             dsn: str | None = None,
             retriever_factory: Callable[..., Retriever] | None = None,
+            llm_client: SupportsComplete | None = None,
+            prompt: PromptTemplate | None = None,
     ) -> None:
         self.settings = settings
         self.options = options or RunnerOptions()
@@ -104,6 +142,9 @@ class QueueRunner:
         self._retriever_factory = retriever_factory or (
             lambda s, collection, top_k: Retriever(s, collection, top_k=top_k)
         )
+        # 生成依赖可注入: 离线单测传 fake client / fake prompt, 不联网
+        self._injected_llm_client = llm_client
+        self._injected_prompt = prompt
         self.log = structlog.get_logger("worker.runner")
         self._stop_requested = False
 
@@ -147,6 +188,19 @@ class QueueRunner:
         chunk_hash = chunking_hash(chunking_cfg)
         collection = collection_name(ctx.corpus_id, chunk_hash)
 
+        # 生成依赖在**任务开始前**就准备好: prompt 非法或 key 缺失属于配置错误,
+        # 应当立刻以 failed 结束任务, 而不是跑到第 37 道题才炸出 60 条死信。
+        owned_client: ChatClient | None = None
+        generation: _GenerationContext | None = None
+        if self.options.generate:
+            try:
+                generation, owned_client = self._build_generation()
+            except (PromptError, LLMFatalError) as exc:
+                message = f"生成配置错误: {exc}"
+                finish_job(self.dsn, job.id, "failed", message)
+                self.log.error("generation_config_invalid", job_id=job.id, error=str(exc))
+                return JobSummary(job.id, job.run_id, "failed", 0, 0, 0, _ms(started))
+
         doc_chunks = {
             row.doc_id: chunk_document(row.raw_text, chunking_cfg)
             for row in list_documents(self.dsn, ctx.corpus_id)
@@ -180,31 +234,49 @@ class QueueRunner:
                 finish_job(self.dsn, job.id, "failed", message)
                 return JobSummary(job.id, job.run_id, "failed", 0, 0, 0, _ms(started))
 
-            while True:
-                if self._stopped_or_paused(processed):
-                    break
-                remaining = self._remaining_batch(processed)
-                items = claim_job_items(self.dsn, job.id, remaining)
-                if not items:
-                    break
-                if time.monotonic() - last_heartbeat >= self.options.heartbeat_seconds:
-                    heartbeat(self.dsn, job.id)
-                    last_heartbeat = time.monotonic()
+            try:
+                while True:
+                    if self._stopped_or_paused(processed):
+                        break
+                    remaining = self._remaining_batch(processed)
+                    items = claim_job_items(self.dsn, job.id, remaining)
+                    if not items:
+                        break
+                    if time.monotonic() - last_heartbeat >= self.options.heartbeat_seconds:
+                        heartbeat(self.dsn, job.id)
+                        last_heartbeat = time.monotonic()
 
-                todo = items
-                if self.options.max_items is not None:
-                    allowance = self.options.max_items - processed
-                    if allowance < len(items):
-                        todo, leftover = items[:allowance], items[allowance:]
-                        release_items(self.dsn, [item.id for item in leftover])
-                success_count, dead_count = self._process_items(
-                    job, todo, gold_by_qid, qid_by_case_id, question_by_case_id, retriever, top_k
+                    todo = items
+                    if self.options.max_items is not None:
+                        allowance = self.options.max_items - processed
+                        if allowance < len(items):
+                            todo, leftover = items[:allowance], items[allowance:]
+                            release_items(self.dsn, [item.id for item in leftover])
+                    success_count, dead_count = self._process_items(
+                        job, todo, gold_by_qid, qid_by_case_id, question_by_case_id, retriever, top_k,
+                        generation,
+                    )
+                    succeeded += success_count
+                    dead += dead_count
+                    processed += len(todo)
+                    if self.options.batch_pause_ms > 0:
+                        time.sleep(self.options.batch_pause_ms / 1000.0)
+            except GenerationAborted as exc:
+                message = f"生成致命错误, 已中止任务: {exc}"
+                # 先把本批已领未处理的条目归位: 否则它们会永远停在 running(接管只看 running 的 job,
+                # 而本任务已是 failed), 进度条会一直显示"运行中 N 条"。
+                released = release_running_items(self.dsn, job.id)
+                finish_job(self.dsn, job.id, "failed", message)
+                update_run_metrics(self.dsn, job.run_id, self._aggregate_run_metrics(job.run_id, top_k))
+                progress = job_progress(self.dsn, job.id)
+                self.log.error(
+                    "generation_aborted", job_id=job.id, run_id=job.run_id,
+                    error=str(exc), released_items=released,
                 )
-                succeeded += success_count
-                dead += dead_count
-                processed += len(todo)
-                if self.options.batch_pause_ms > 0:
-                    time.sleep(self.options.batch_pause_ms / 1000.0)
+                return JobSummary(
+                    job.id, job.run_id, "failed", progress["succeeded"], progress["failed"],
+                    processed, _ms(started),
+                )
 
             if self._stopped_or_paused(processed):
                 release_job(self.dsn, job.id)
@@ -227,6 +299,37 @@ class QueueRunner:
             )
         finally:
             retriever.close()
+            if owned_client is not None:
+                owned_client.close()
+
+    def _build_generation(self) -> tuple[_GenerationContext, ChatClient | None]:
+        """组装生成依赖(prompt + 客户端); 校验失败直接抛错, 由 execute_job 转成任务失败。
+
+        返回值第二个元素是"本任务自己创建的客户端"(需要关闭); 注入的客户端不归本任务管。
+        """
+        prompt = self._injected_prompt or load_prompt(self.options.prompt_id)
+        client = self._injected_llm_client
+        owned: ChatClient | None = None
+        if client is None:
+            owned = ChatClient(
+                base_url=self.settings.generation_base_url,
+                api_key=self.settings.resolved_generation_api_key,
+                model=self.settings.generation_model,
+                timeout=self.settings.generation_timeout_seconds,
+                max_retries=self.settings.generation_max_retries,
+            )
+            client = owned
+        context = _GenerationContext(
+            client=client,
+            prompt=prompt,
+            provider=self.settings.generation_provider,
+            base_url=self.settings.generation_base_url,
+            max_context_chars=self.settings.generation_max_context_chars,
+            temperature=self.settings.generation_temperature,
+            max_tokens=self.settings.generation_max_tokens,
+            concurrency=max(1, self.options.generation_concurrency),
+        )
+        return context, owned
 
     def _process_items(
             self,
@@ -237,8 +340,14 @@ class QueueRunner:
             question_by_case_id: dict[int, str],
             retriever: Retriever,
             top_k: int,
+            generation: _GenerationContext | None = None,
     ) -> tuple[int, int]:
-        """执行一批微任务: 批量向量化 + 批量检索 + 逐条 checkpoint。"""
+        """执行一批微任务: 批量向量化 + 批量检索 (+ 并行生成) + 逐条 checkpoint。
+
+        生成放在**写库之前**且整批并行: LLM 是这一环里唯一的慢操作(稳态 ~2.4s/题),
+        串行会让 60 题的 run 从 35s 变成 2 分钟以上; 而写库仍保持逐条串行,
+        避免并发事务争抢同一 job 的进度行。
+        """
         succeeded = 0
         dead = 0
         questions: list[str] = []
@@ -269,18 +378,48 @@ class QueueRunner:
                     dead += 1
             return succeeded, dead
 
-        for item, hits in zip(valid_items, responses, strict=True):
+        outcomes: list[GenerationOutcome] = (
+            self._generate_batch(generation, questions, responses)
+            if generation is not None
+            else [("disabled", None)] * len(valid_items)
+        )
+
+        for index, (item, hits) in enumerate(zip(valid_items, responses, strict=True)):
             qid = qid_by_case_id[item.case_id]
             gold = gold_by_qid.get(qid, set())
             retrieved = [
                 {"point_id": h.point_id, "doc_id": h.doc_id, "score": round(h.score, 6)} for h in hits
             ]
+
+            generated: GenerationResult | None = None
+            tag, payload = outcomes[index]
+            if tag == "transient":
+                if not fail_item(
+                        self.dsn, job_id=job.id, item_id=item.id, error=f"生成失败: {payload}",
+                        max_retries=self.options.max_retries,
+                ):
+                    dead += 1
+                continue
+            if tag == "fatal":
+                # 记一笔失败原因(不重试), 然后中止整个任务 —— 见 GenerationAborted 的说明
+                fail_item(
+                    self.dsn, job_id=job.id, item_id=item.id, error=f"生成致命错误: {payload}",
+                    max_retries=1,
+                )
+                raise GenerationAborted(str(payload))
+            if tag == "ok":
+                assert isinstance(payload, GenerationResult)
+                generated = payload
+
             metric = evaluate_case(qid, gold, [h.point_id for h in hits], top_k)
             if metric is None:
-                # gold 为空: 该题不可评测, 记为 skipped 而不是失败
+                # gold 为空: 检索侧不可评测, 记为 skipped 而不是失败;
+                # 但生成侧仍然有效(judge 只看答案与上下文), 所以答案照常落库。
                 complete_item(
                     self.dsn, job_id=job.id, item_id=item.id, run_id=job.run_id, case_id=item.case_id,
                     retrieved=retrieved, metrics={}, flags=["no_gold"],
+                    answer=generated.answer if generated else None,
+                    generation=generated.meta.to_json() if generated else None,
                 )
                 succeeded += 1
                 continue
@@ -288,6 +427,8 @@ class QueueRunner:
                 complete_item(
                     self.dsn, job_id=job.id, item_id=item.id, run_id=job.run_id, case_id=item.case_id,
                     retrieved=retrieved, metrics=metric.to_json(), flags=[],
+                    answer=generated.answer if generated else None,
+                    generation=generated.meta.to_json() if generated else None,
                 )
             except Exception as exc:  # noqa: BLE001 - 落库失败需记录并决定是否重试
                 if not fail_item(
@@ -299,13 +440,54 @@ class QueueRunner:
             succeeded += 1
         return succeeded, dead
 
+    def _generate_batch(
+            self,
+            generation: _GenerationContext,
+            questions: list[str],
+            responses: list[list[Any]],
+    ) -> list[GenerationOutcome]:
+        """整批并行生成; 错误按类型转成标记, 交给写库阶段决定"重试还是中止"。
+
+        这里不做任何 DB 写 —— 生成阶段是纯计算+网络, 失败只记录不落库, 保证
+        "写库 == 成功的生成 + 检索结果"这一不变式。
+        """
+
+        def run_one(question: str, hits: list[Any]) -> GenerationOutcome:
+            try:
+                result = generate_answer(
+                    question=question,
+                    hits=hits,
+                    client=generation.client,
+                    prompt=generation.prompt,
+                    provider=generation.provider,
+                    base_url=generation.base_url,
+                    max_context_chars=generation.max_context_chars,
+                    temperature=generation.temperature,
+                    max_tokens=generation.max_tokens,
+                )
+            except (EmptyAnswerError, LLMTransientError) as exc:
+                return "transient", exc
+            except (LLMFatalError, PromptError) as exc:
+                return "fatal", exc
+            return "ok", result
+
+        workers = max(1, min(generation.concurrency, len(questions)))
+        if workers == 1:
+            return [run_one(q, h) for q, h in zip(questions, responses, strict=True)]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run_one, q, h) for q, h in zip(questions, responses, strict=True)]
+            return [future.result() for future in futures]
+
     def _aggregate_run_metrics(self, run_id: int, top_k: int) -> dict[str, Any]:
         """从 DB 读全部单题指标聚合(续跑场景下也能算全量, 不依赖内存态)。"""
         rows = list_case_metric_rows(self.dsn, run_id)
         metrics = [_to_case_metric(row) for row in rows if row]
         evaluated = [m for m in metrics if m is not None]
         skipped = len([row for row in rows if not row])
-        return aggregate(evaluated, top_k, skipped=skipped)
+        result = aggregate(evaluated, top_k, skipped=skipped)
+        # 生成侧用量(D8 成本核算): 同样从 DB 聚合, 续跑/接管后不会算少
+        result.update(get_generation_usage(self.dsn, run_id))
+        return result
 
     def _stopped_or_paused(self, processed: int) -> bool:
         if self._stop_requested:

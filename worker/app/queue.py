@@ -149,18 +149,26 @@ def complete_item(
         metrics: dict[str, Any],
         flags: list[str],
         latency_ms: int | None = None,
+        answer: str | None = None,
+        generation: dict[str, Any] | None = None,
 ) -> None:
-    """单条 case 完成(原子 checkpoint): 结果 + 状态 + 进度一起提交。"""
+    """单条 case 完成(原子 checkpoint): 结果 + 状态 + 进度一起提交。
+
+    M4 起 answer 与生成元信息也走这**同一个事务** —— 生成不能"另起一个事务再补一笔",
+    否则崩溃时会留下"有答案没指标"或反之的半成品状态, 报告与归因都会失真。
+    """
     with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO case_results (run_id, case_id, retrieved, metrics, flags, latency_ms)
-            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s)
+            INSERT INTO case_results (run_id, case_id, retrieved, metrics, flags, latency_ms, answer, generation)
+            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)
                 ON CONFLICT (run_id, case_id) DO UPDATE
                                                      SET retrieved  = EXCLUDED.retrieved,
                                                      metrics    = EXCLUDED.metrics,
                                                      flags      = EXCLUDED.flags,
                                                      latency_ms = EXCLUDED.latency_ms,
+                                                     answer     = EXCLUDED.answer,
+                                                     generation = EXCLUDED.generation,
                                                      updated_at = now()
             """,
             (
@@ -170,6 +178,8 @@ def complete_item(
                 _dumps(metrics),
                 _dumps(flags),
                 latency_ms,
+                answer,
+                _dumps(generation or {}),
             ),
         )
         cur.execute(
@@ -235,6 +245,26 @@ def release_items(dsn: str, item_ids: list[int]) -> int:
             (item_ids,),
         )
         return cur.rowcount
+
+
+def release_running_items(dsn: str, job_id: int) -> int:
+    """把该任务下仍处于 running 的微任务**全部**放回 pending, 并刷新进度。
+
+    为什么需要它: 任务被"致命错误"中止时, 本批已领取的条目还没写结果。
+    若直接把它们留在 running:
+    - 进度条会永远显示"运行中 N 条"(进度一致性问题);
+    - 接管逻辑只扫描 `jobs.status='running'` 的任务, 而这个 job 已是 failed, **永远不会被接管**,
+      这些条目就成了孤儿。
+    因此中止路径必须先把 running 条目归位, 再结束任务。
+    """
+    with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE job_items SET status = 'pending', updated_at = now() WHERE job_id = %s AND status = 'running'",
+            (job_id,),
+        )
+        released = cur.rowcount
+        cur.execute(PROGRESS_SQL, (job_id, job_id))
+    return released
 
 
 def release_job(dsn: str, job_id: int) -> bool:
