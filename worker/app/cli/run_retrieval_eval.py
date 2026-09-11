@@ -1,4 +1,11 @@
-"""CLI: 同步跑一次检索评测, 可选落库(M2 最简 runner; M3 迁入异步 worker + 断点续跑)。
+"""CLI: 离线对照跑一次检索评测, 可选落库(M2 最简 runner)。
+
+**定位(定稿, 见 docs/reliability.md §6)**: 这是**调试/对照工具**, 不是生产路径。
+生产路径是异步队列: `POST /api/v1/runs` 入队 + `python -m app.cli.worker` 消费
+(有 checkpoint / 心跳 / 接管 / 重试 / 进度)。本 CLI 不经队列、不建 job, 因此:
+- 中途失败即整次作废(没有断点续跑);
+- `GET /runs/:id/progress` 对它返回 `job: null`, 前端显示"无队列任务" —— **这是有意行为**, 不是 bug。
+适用场景: 快速验证指标口径改动、试不同切分/top_k、用已存结果复算 k 敏感性。
 
 用法:
     # 只跑不落库(输出 JSON 报告)

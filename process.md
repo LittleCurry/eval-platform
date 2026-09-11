@@ -267,6 +267,17 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 
 ---
 
+### D13 进度推送 = 短轮询（3s，仅活跃任务）；WebSocket/SSE 列 backlog
+
+**决策**：M3 的进度可见性用 `GET /runs/:id/progress` + 前端 3s 短轮询实现，**不引入 WebSocket/SSE**。轮询仅在列表/详情页存在**活跃任务**（`pending`/`running`）时启动，空闲即停（前端有"自动刷新"开关）。
+
+- **为什么轮询够了**：进度是数据库里的一行 JSON（`jobs.progress`，由 checkpoint 事务用 `count(*)` 重算，见 `docs/reliability.md` §3），单次查询是主键索引命中；活跃任务期间 3s 一次的代价可忽略，而空闲时**零请求**。
+- **被否决的"实时推送"**：WebSocket 要引入连接管理、心跳、断线重连、多实例广播（Redis pub/sub），在"单机 docker compose + 同事共用"的形态下收益不足；SSE 稍轻但仍需长连接与代理配置。
+- **backlog（附触发条件）**：需要**实时日志面板**（逐条 case 的滚动日志、worker 侧事件流）或进度写入频率提升到秒级以下时，再评估 SSE/WebSocket —— 顺序上先 SSE（单向、可复用 HTTP 鉴权）。这是 M7 可视化阶段的评估项，不影响 M4/M5。
+- **一致性说明**：`stale` 标记（疑似 worker 掉线）也走同一接口，因此"进度卡住"与"worker 掉线告警"是同一个信号，不需要额外通道。
+
+---
+
 ## 5. 评测集建设指南（中文自建语料）
 
 > 这是全项目最容易卡、也最不能省的环节。**先小后大**：首个领域 20–50 篇源文档 + 30–100 题即可让 M2 出可信指标，之后迭代扩量。
@@ -387,17 +398,29 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 
 > 面试含金量集中点：持久化队列、checkpoint 续跑、心跳、重试、死信。
 
-**任务清单**
-- [ ] job 领取协议：worker 轮询 `FOR UPDATE SKIP LOCKED`；job 状态机 `pending→running→succeeded/failed`，job_items 状态机细化
-- [ ] **checkpoint 提交**：逐条 case 独立事务写 `case_results` + 推进 `job_items`（D2）
-- [ ] 心跳与超时接管：`heartbeat_at` 刷新；worker 端恢复逻辑=扫描 running 且心跳过期的 job_items 重新入队
-- [ ] 重试与退避：瞬时错误按类型重试（`retry_count` 上限）→ 超过进 failed 并记录原因；不吞错
-- [ ] 进度：job.progress 汇总 + API 轮询 + WebSocket 推送（前端进度条/日志面板）
-- [ ] 把 M2 的同步 runner 迁入 worker；并发上限可配
-- [ ] 故障演练文档 + 脚本：跑一半 `kill -9` worker → 重启 → 续跑只补剩余 case
-- [ ] 集成测试：多 worker 并发领取不重复执行（幂等断言）、中断续跑不重算、死信路径
+**任务清单**（✅ 2026-09-11 完成，tag `v0.3.0-m3`）
+- [x] job 领取协议：worker 轮询 `FOR UPDATE SKIP LOCKED`；job 状态机 `pending→running→succeeded/failed`，job_items 状态机细化
+- [x] **checkpoint 提交**：逐条 case 独立事务写 `case_results` + 推进 `job_items`（D2）
+- [x] 心跳与超时接管：`heartbeat_at` 刷新；worker 端恢复逻辑=扫描 running 且心跳过期的 job_items 重新入队
+- [x] 重试与退避：瞬时错误按类型重试（`retry_count` 上限）→ 超过进 failed 并记录原因；不吞错
+- [x] 进度：`jobs.progress` 汇总 + `GET /runs/:id/progress` 轮询 API + 前端进度条（活跃任务 3s 自动刷新）；**WebSocket/SSE 见 D13 backlog**（原清单里的"WebSocket 推送"未做，故在此显式改写，不留假勾）
+- [x] 把 M2 的同步 runner 迁入 worker（`app.cli.run_retrieval_eval` 保留为离线对照工具，见 `docs/reliability.md` §6）；批量大小 `--batch-size` 可配，并发粒度=job 级（D12）
+- [x] 故障演练文档 + 脚本：跑一半 `kill -9` worker → 重启 → 续跑只补剩余 case（`scripts/fault_drill.sh` + `docs/fault-drills.md`）
+- [x] 集成测试：多 worker 并发领取不重复执行（幂等断言）、中断续跑不重算、死信路径
+      （Go `queue_live_test.go` 7 条 + worker `test_queue_runner.py`/`test_reclaim_live.py`/`test_concurrency_live.py`）
 
-**验收标准**：50+ 题 run 进行中杀 worker，重启后从断点续跑完成，结果与全量跑一致；前端能看到实时进度。
+**验收标准**：50+ 题 run 进行中杀 worker，重启后从断点续跑完成，结果与全量跑一致；前端能看到实时进度。✅ **已达成**
+
+**M3 完成小结（2026-09-11）**
+
+- **规模回归**：v2 60 题（dataset 4，`chunking_hash=5f45e034` 未变，与 v1 同向量空间）。参照 run #100 全量跑完 → 演练 run #101 中途 `kill -9`（崩溃时已完成 4 条）→ 接管后续跑 `processed=56`（恰好等于剩余）→ `compare_runs` **逐题一致（退出码 0）**，指标逐位相同：`recall@5 0.948611 / precision@5 0.23 / mrr@5 0.883889 / hit@5 1.0`。
+- **并发粒度**：job 级（D12）。两 worker 各持一 job 并行，采样 32 次中 15 次同时 `running`；同一 job 二次领取必失败（Go/worker 各一组 live 断言）。
+- **进度可视化**：`job.progress`（checkpoint 事务内 `count(*)` 重算）+ `/runs/:id/progress`（含 `stale` 疑似掉线）+ 前端进度条与 3s 轮询（D13）。
+- **可复现性证据**：`config_hash=b6598ed9` 下 run #3/#22/#32/#99 四次 run（`git_sha` 分别为 `1dbf358/484f26d/d54c4e6/9e39459`）`recall@k` 逐位一致；同时测出**分数噪声底**（同 chunk 跨 run 中位 3e-4、最大 2.1e-3）→ 写入 `compare_runs` 输出，作为 M5 判定门槛。
+- **指标口径发现（转 M5 输入）**：k=5 时 60 题中 55 题满分、0 题未命中（饱和）；k=1 时 recall 0.6736 / mrr 0.7833（13 题未命中）。**配置对比应看 k=1/3 与 MRR**；离线用 top-5 列表重算 k 的结果与真跑 `top_k=1` 完全吻合，可省真跑。
+- **数据质量项（转 v3）**：v1 的 zjc-017/018/024/026 锚点 span 与文档标题同词 → 命中整篇文档、gold 膨胀、**Recall 被系统性压低**（v1 全部召回损失的算术来源即这 4 题）。"召回不全"的正确示例改为 zjc-031（跨文档漏召 D02）。
+- **偏差记录**：① 原计划的"WebSocket 推送"改为轮询（D13）；② `--once` 会领走任意 pending 任务，调试纪律改为一律 `--job-id`（已写入演练手册）；③ 演练脚本改为默认保留 run（它是一致性验收的右操作数）。
+- **文档**：`docs/reliability.md`（设计详解 + 三条面试话术）、`docs/fault-drills.md`（演练手册 + 实测记录 + 已知边界）、`README.md` 可靠性章节。
 
 ---
 
@@ -533,6 +556,7 @@ eval-platform/
 3. **是否有现成线上 RAG/Agent 可作 HTTP adapter 的真实被测对象**：有 → 契约按它校准；没有 → M2–M4 先用 builtin 模式，M7 前再接入。
 4. **部署形态**：同事共用是"内网一台机器 docker compose"还是云服务器？影响 M7 部署文档与鉴权强度。
 5. **评测集规模预期**：中期想扩到多少题、是否多领域（决定 datasets/cases 是否需要更重的组织方式）。
+   → **进展（2026-09-11）**：v2 已扩到 **60 题**（dataset 4，补齐 A01/A02/C04/E01/E02/E03 六个盲区），锚点覆盖率 100%。当前规模下 k=5 的 Recall 已接近饱和（55/60 题满分），**扩量的优先级低于"加难题"**：M6 视需要扩到 100+ 时，优先补"跨文档/同义改写/干扰对照"三类题（提分空间在 k=1/3 与 MRR，见 M3 小结）。多领域暂不做，先把单一领域的评测深度做透。
 6. **登录方式**：自建账号密码足够，还是需要对接公司 SSO/企业微信？（默认先自建，SSO 留扩展位）
 
 ---

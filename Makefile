@@ -1,6 +1,6 @@
 .PHONY: help up-deps down-deps ps api migrate-up migrate-down migrate-version \
         migrate-create worker-setup worker-test worker-lint worker-healthcheck \
-        drill drill-compare compare parallel-demo test lint verify
+        drill drill-compare compare parallel-demo test test-live lint verify
 
 help: ## 显示可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F'## ' '{split($$1, t, ":"); printf "  \033[36m%-18s\033[0m %s\n", t[1], $$2}'
@@ -81,11 +81,16 @@ lint: ## 静态检查 (go vet + ruff)
 	cd server && go vet ./...
 	cd worker && .venv/bin/ruff check .
 
+test-live: ## 集成测试(连真实 PG/Qdrant/embedding; 需 .env 配好 key)
+	cd server && RUN_LIVE=1 go test ./internal/store/ -v
+	cd worker && RUN_LIVE=1 .venv/bin/pytest -q
+
 verify: ## 一键全量验证 (起依赖 + 迁移 + 测试 + lint)
 	@make up-deps
 	@make migrate-up
 	@make test
 	@make lint
+	@echo "提示: 集成测试请单独跑 make test-live(RUN_LIVE=1, 需要 .env 里的 key)"
 
 # ---- Web (前端) ----
 .PHONY: web-install web web-build web-test
