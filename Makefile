@@ -1,9 +1,9 @@
 .PHONY: help up-deps down-deps ps api migrate-up migrate-down migrate-version \
         migrate-create worker-setup worker-test worker-lint worker-healthcheck \
-        test lint verify
+        drill drill-compare compare test lint verify
 
 help: ## 显示可用目标
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F'## ' '{split($$1, t, ":"); printf "  \033[36m%-18s\033[0m %s\n", t[1], $$2}'
 
 # ---- 依赖服务 (docker compose) ----
 up-deps: ## 启动依赖服务 (postgres + qdrant)
@@ -57,6 +57,16 @@ worker-lint: ## ruff 静态检查
 
 worker-healthcheck: ## worker 依赖连通性自检
 	cd worker && .venv/bin/python -m app.healthcheck
+
+# ---- 可靠性演练与一致性校验 (M3) ----
+drill: ## 故障演练(默认 v2 60 题; DATASET_ID=3 可跑 30 题快版)
+	scripts/fault_drill.sh
+
+drill-compare: ## 故障演练 + 与参照 run 逐题比对: make drill-compare REF=100
+	COMPARE_WITH=$(REF) scripts/fault_drill.sh
+
+compare: ## 两次 run 逐题一致性对比: make compare LEFT=100 RIGHT=101
+	cd worker && .venv/bin/python -m app.cli.compare_runs --left $(LEFT) --right $(RIGHT)
 
 # ---- 全量收口 ----
 test: ## 运行全部单测 (Go + Python + Web)

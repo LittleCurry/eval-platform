@@ -340,3 +340,85 @@ func TestReclaimLeavesFreshJobAloneLive(t *testing.T) {
 		t.Fatalf("活跃任务的 run 应保持 running: %s", still.Status)
 	}
 }
+
+// TestQueueRunningJobIsNeverClaimedTwiceLive 固定 D12 的并发粒度: **一个 job 只能被一个 worker 持有**。
+//
+// 多 worker 的并行靠"多 job"(见 TestQueueConcurrentClaimNoDuplicateLive), 而不是"多 worker 分食同一 job";
+// 后者需要 job_items 级租约, 属于 D12 的 backlog。
+//
+// 断言:
+//  1. 按 id 首次领取成功且状态为 running;
+//  2. 同一 job 再次按 id 领取 → 拿不到(而不是重复执行);
+//  3. 4 个 goroutine 同时争抢同一个 pending job → **有且只有一个**成功;
+//  4. 同一 job 的两批微任务领取互不重叠。
+func TestQueueRunningJobIsNeverClaimedTwiceLive(t *testing.T) {
+	pg := livePostgres(t)
+	ctx := context.Background()
+
+	// ---- 场景 1: 已被持有的 job 不能被二次领取 ----
+	ref, _ := newLiveRun(t, pg)
+
+	first, err := pg.ClaimJobByID(ctx, ref.JobID)
+	if err != nil {
+		t.Fatalf("首次领取失败: %v", err)
+	}
+	if first == nil || first.ID != ref.JobID {
+		t.Fatalf("首次应领到 job %d, 实际 %+v", ref.JobID, first)
+	}
+	if first.Status != "running" {
+		t.Fatalf("领取后状态应为 running, 实际 %s", first.Status)
+	}
+
+	again, err := pg.ClaimJobByID(ctx, ref.JobID)
+	if err != nil {
+		t.Fatalf("二次领取不应报错: %v", err)
+	}
+	if again != nil {
+		t.Fatalf("运行中的任务被重复领取: %+v", again)
+	}
+
+	batchA, err := pg.ClaimJobItems(ctx, ref.JobID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchB, err := pg.ClaimJobItems(ctx, ref.JobID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int64]bool{}
+	for _, item := range batchA {
+		seen[item.ID] = true
+	}
+	for _, item := range batchB {
+		if seen[item.ID] {
+			t.Fatalf("同一 job 的两次微任务领取出现重复: %d", item.ID)
+		}
+	}
+
+	// ---- 场景 2: 多个 goroutine 同时争抢同一个 pending job ----
+	ref2, _ := newLiveRun(t, pg)
+
+	var wg sync.WaitGroup
+	winners := make(chan int64, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			job, err := pg.ClaimJobByID(ctx, ref2.JobID)
+			if err != nil || job == nil {
+				return
+			}
+			winners <- job.ID
+		}()
+	}
+	wg.Wait()
+	close(winners)
+
+	got := make([]int64, 0, 4)
+	for id := range winners {
+		got = append(got, id)
+	}
+	if len(got) != 1 || got[0] != ref2.JobID {
+		t.Fatalf("同一 pending job 应被恰好一个 goroutine 领到, 实际 %v (期望 job %d)", got, ref2.JobID)
+	}
+}
