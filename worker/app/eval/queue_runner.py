@@ -1,15 +1,21 @@
 """队列消费者: 领任务 → 逐条执行评测 → checkpoint 落库 → 结束任务。
 
 设计要点:
-- 每条 case 由 queue.complete_item 原子提交(结果 + 微任务状态 + 进度); 中断只丢当前一条;
+- 每条 case 由 queue.complete_item 原子提交(检索结果 + 生成答案 + judge 判定 + 微任务状态 + 进度);
+  中断只丢当前一条;
 - 心跳按周期刷新; 心跳超时的任务由 reclaim_stale_jobs 接管(常驻模式周期自动执行);
 - 支持 max_items 提前停止(测试/灰度): 未跑的微任务放回 pending, 任务也放回队列,
   下一次 run_once 从断点继续 —— 这就是"中断续跑"。
+
+M4 起多出两个阶段, 二者都由 **run 的配置快照**决定是否执行(D14):
+1. **生成**(generation 段): 用检索到的 top-k 上下文产出 answer;
+2. **判定**(judge 段): 对 answer 做 claim 级事实核查(±rubric 打分)。
+worker 不看 CLI/环境变量决定"跑不跑", 只看快照 —— 这样"跑过的实验"与"记录的配置"永远一致。
 """
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -17,8 +23,23 @@ from typing import Any
 import structlog
 
 from app.config import Settings
+from app.eval.attribution import (
+    DEFAULT_LOW_RANK_RATIO,
+    DEFAULT_QUALITY_LINE,
+    Thresholds,
+    attribute_case,
+    attribution_meta,
+)
 from app.generation.builtin import EmptyAnswerError, GenerationResult, SupportsComplete, generate_answer
 from app.generation.prompts import PromptError, PromptTemplate, load_prompt
+from app.judge.builtin import (
+    CLAIMS_REQUIRED_PLACEHOLDERS,
+    RUBRIC_REQUIRED_PLACEHOLDERS,
+    JudgeFailed,
+    JudgeResult,
+    judge_case,
+)
+from app.judge.cache import JudgeCache, NullJudgeCache, PostgresJudgeCache
 from app.llm.client import ChatClient, LLMFatalError, LLMTransientError
 from app.metrics.retrieval import CaseMetric, aggregate, evaluate_case
 from app.queue import (
@@ -43,7 +64,7 @@ from app.retrieval.anchor import AnchorSpec, GoldCase, map_dataset_cases
 from app.retrieval.chunker import ChunkingConfig, chunk_document, chunking_hash
 from app.retrieval.collections import collection_exists, collection_name
 from app.retrieval.retriever import Retriever
-from app.store import get_generation_usage, list_cases, list_documents
+from app.store import get_generation_usage, get_judge_usage, list_cases, list_documents
 
 _CASE_METRIC_FIELDS = (
     "qid",
@@ -68,22 +89,35 @@ class RunnerOptions:
     stale_timeout_seconds: float = 60.0
     reclaim_every_polls: int = 10
     batch_pause_ms: float = 0.0  # 批次间暂停(故障演练/模拟慢 LLM 用)
-    # ---- M4: 生成链路 ----
-    # 注意: "是否生成"**不由这里决定**, 而是看 run 的配置快照里有没有 generation 段(D14) ——
-    # 这样"跑过的实验"与"记录的配置"永远一致, 不会出现"快照写着只跑检索、实际却调了模型"。
+    # ---- M4: 生成 / judge 链路的**执行资源**(实验参数在快照里, 见下) ----
+    # "跑不跑"由快照的 generation / judge 段决定(D14), 这里只决定"跑多快"。
     generation_concurrency: int = 4   # 同批次内并行生成数(实测单题稳态 ~2.4s, 4 并发足够且不易触发限流)
+    judge_concurrency: int = 4        # 同批次内并行判定数(M4-2; judge 每案例 2 次调用)
+    # ---- M4-3: 归因阈值(打标口径)。它们**会随标签一起落进 runs.metrics.attribution**(D15) ----
+    # k=5 时 low_rank_limit = ceil(5*0.5) = 3(排位 > 3 记"排序靠后"); k=1 时 = 1(永不触发)。
+    low_rank_ratio: float = DEFAULT_LOW_RANK_RATIO
+    quality_line: int = DEFAULT_QUALITY_LINE   # helpfulness/relevance <= 3 记为质量不达标
 
 
 class GenerationSectionError(RuntimeError):
     """配置快照里的 generation 段缺失/类型不对 —— 属于提交侧的问题, 直接失败并说明原因。"""
 
 
-class GenerationAborted(RuntimeError):
-    """生成侧**致命**错误(鉴权/欠费/prompt 资产非法): 结束整个任务而不是刷 60 条死信。
+class JudgeSectionError(RuntimeError):
+    """配置快照里的 judge 段不合法(缺 model / 缺 prompt id) —— 同样是提交侧的问题。"""
+
+
+class LlmAborted(RuntimeError):
+    """LLM 侧**致命**错误(鉴权/欠费/参数错/配置非法): 结束整个任务而不是刷 N 条死信。
 
     为什么必须区分: 402 欠费、401 key 错这类问题重试一万次也一样, 但如果在逐条循环里
-    各自"失败并继续", 结果是 60 次无意义请求 + 60 条死信, 真正的原因被埋在日志里。
+    各自"失败并继续", 结果是 N 次无意义请求 + N 条死信, 真正的原因被埋在日志里。
+    (M4-1 时叫 GenerationAborted, M4-2 起同时服务 judge, 故改名。)
     """
+
+
+# 兼容旧名(文档与历史提交里出现过)
+GenerationAborted = LlmAborted
 
 
 @dataclass
@@ -100,9 +134,29 @@ class _GenerationContext:
     concurrency: int
 
 
-# 单题生成结果标记:
-#   ("ok", GenerationResult) | ("transient", Exception) | ("fatal", Exception) | ("disabled", None)
-GenerationOutcome = tuple[str, Any]
+@dataclass
+class _JudgeContext:
+    """一次任务内共享的判定依赖。"""
+
+    client: SupportsComplete
+    cache: JudgeCache
+    claims_prompt: PromptTemplate
+    rubric_prompt: PromptTemplate | None
+    provider: str
+    base_url: str
+    model: str
+    temperature: float
+    max_tokens: int
+    max_claims: int
+    max_context_chars: int
+    max_retries: int
+    concurrency: int
+
+
+# 单条 LLM 阶段结果标记:
+#   ("ok", GenerationResult/JudgeResult) | ("transient", Exception) | ("fatal", Exception)
+#   | ("disabled", None) 未启用该阶段 | ("skip", None) 前置阶段失败, 本阶段不执行
+StageOutcome = tuple[str, Any]
 
 
 @dataclass
@@ -139,6 +193,10 @@ class QueueRunner:
             retriever_factory: Callable[..., Retriever] | None = None,
             llm_client: SupportsComplete | None = None,
             prompt: PromptTemplate | None = None,
+            judge_client: SupportsComplete | None = None,
+            judge_claims_prompt: PromptTemplate | None = None,
+            judge_rubric_prompt: PromptTemplate | None = None,
+            judge_cache: JudgeCache | None = None,
     ) -> None:
         self.settings = settings
         self.options = options or RunnerOptions()
@@ -146,15 +204,32 @@ class QueueRunner:
         self._retriever_factory = retriever_factory or (
             lambda s, collection, top_k: Retriever(s, collection, top_k=top_k)
         )
-        # 生成依赖可注入: 离线单测传 fake client / fake prompt, 不联网
+        # 生成/判定的依赖都可注入: 离线单测传 fake, 不联网
         self._injected_llm_client = llm_client
         self._injected_prompt = prompt
+        self._injected_judge_client = judge_client
+        self._injected_claims_prompt = judge_claims_prompt
+        self._injected_rubric_prompt = judge_rubric_prompt
+        self._injected_judge_cache = judge_cache
         self.log = structlog.get_logger("worker.runner")
         self._stop_requested = False
 
     def request_stop(self) -> None:
         """请求停止(信号处理或测试调用); 当前批次处理完后退出。"""
         self._stop_requested = True
+
+    def _thresholds(self, top_k: int) -> Thresholds:
+        """本次任务的归因阈值(M4-3)。
+
+        它们是**执行侧旋钮**(可通过 CLI 覆盖), 但会被原样写进 runs.metrics.attribution:
+        k 从 1 变到 5 时 retrieval_partial 的数量本来就会变(实测 12 条 -> 5 条),
+        不记阈值则跨 run 的标签数根本不可比(D15)。
+        """
+        return Thresholds(
+            k=top_k,
+            low_rank_ratio=self.options.low_rank_ratio,
+            quality_line=self.options.quality_line,
+        )
 
     def run_once(self, job_id: int | None = None) -> JobSummary | None:
         """领取并执行一个任务; 没有可领任务时返回 None。指定 job_id 时只跑该任务。"""
@@ -192,19 +267,35 @@ class QueueRunner:
         chunk_hash = chunking_hash(chunking_cfg)
         collection = collection_name(ctx.corpus_id, chunk_hash)
 
-        # 生成依赖在**任务开始前**就准备好: 快照不合法、prompt 缺失、key 缺失都属于配置错误,
-        # 应当立刻以 failed 结束任务, 而不是跑到第 37 道题才炸出 60 条死信。
-        owned_client: ChatClient | None = None
+        # 生成/判定依赖在**任务开始前**就准备好: 快照不合法、prompt 缺失、key 缺失都属于配置错误,
+        # 应当立刻以 failed 结束任务, 而不是跑到第 37 道题才炸出 N 条死信。
+        owned_clients: list[ChatClient] = []
         generation: _GenerationContext | None = None
+        judging: _JudgeContext | None = None
         try:
-            generation, owned_client = self._generation_from_snapshot(snapshot)
-        except (PromptError, LLMFatalError, GenerationSectionError) as exc:
-            message = f"生成配置错误: {exc}"
+            generation, gen_client = self._generation_from_snapshot(snapshot)
+            if gen_client is not None:
+                owned_clients.append(gen_client)
+            judging, judge_client = self._judge_from_snapshot(snapshot)
+            if judge_client is not None:
+                owned_clients.append(judge_client)
+            if judging is not None and generation is None:
+                # 没有答案就没有可核查的对象: 这种快照是提交错误, 立刻说明而不是空跑一轮
+                raise JudgeSectionError(
+                    "快照含 judge 段但没有 generation 段: 判定无从下手(请在提交时同时启用 generation)"
+                )
+        except (PromptError, LLMFatalError, GenerationSectionError, JudgeSectionError) as exc:
+            # 文案区分阶段: 排障时一眼看出是生成侧还是判定侧的配置问题
+            stage = "判定" if isinstance(exc, JudgeSectionError) else "生成"
+            message = f"{stage}配置错误: {exc}"
+            for client in owned_clients:
+                client.close()
             finish_job(self.dsn, job.id, "failed", message)
-            self.log.error("generation_config_invalid", job_id=job.id, error=str(exc))
+            self.log.error("llm_config_invalid", job_id=job.id, error=str(exc))
             return JobSummary(job.id, job.run_id, "failed", 0, 0, 0, _ms(started))
-        if generation is None:
-            self.log.info("job_mode_retrieval_only", job_id=job.id, run_id=job.run_id)
+
+        mode = "retrieval" + ("+generation" if generation else "") + ("+judge" if judging else "")
+        self.log.info("job_mode", job_id=job.id, run_id=job.run_id, mode=mode)
 
         doc_chunks = {
             row.doc_id: chunk_document(row.raw_text, chunking_cfg)
@@ -258,24 +349,27 @@ class QueueRunner:
                             todo, leftover = items[:allowance], items[allowance:]
                             release_items(self.dsn, [item.id for item in leftover])
                     success_count, dead_count = self._process_items(
-                        job, todo, gold_by_qid, qid_by_case_id, question_by_case_id, retriever, top_k,
-                        generation,
+                        job, todo, gold_by_qid, qid_by_case_id, question_by_case_id,
+                        retriever, top_k, generation, judging,
                     )
                     succeeded += success_count
                     dead += dead_count
                     processed += len(todo)
                     if self.options.batch_pause_ms > 0:
                         time.sleep(self.options.batch_pause_ms / 1000.0)
-            except GenerationAborted as exc:
-                message = f"生成致命错误, 已中止任务: {exc}"
+            except LlmAborted as exc:
+                message = f"LLM 致命错误, 已中止任务: {exc}"
                 # 先把本批已领未处理的条目归位: 否则它们会永远停在 running(接管只看 running 的 job,
                 # 而本任务已是 failed), 进度条会一直显示"运行中 N 条"。
                 released = release_running_items(self.dsn, job.id)
                 finish_job(self.dsn, job.id, "failed", message)
-                update_run_metrics(self.dsn, job.run_id, self._aggregate_run_metrics(job.run_id, top_k))
+                update_run_metrics(
+                    self.dsn, job.run_id,
+                    self._aggregate_run_metrics(job.run_id, top_k, judge_enabled=judging is not None),
+                )
                 progress = job_progress(self.dsn, job.id)
                 self.log.error(
-                    "generation_aborted", job_id=job.id, run_id=job.run_id,
+                    "llm_aborted", job_id=job.id, run_id=job.run_id,
                     error=str(exc), released_items=released,
                 )
                 return JobSummary(
@@ -295,7 +389,10 @@ class QueueRunner:
             status = "failed" if progress["failed"] else "succeeded"
             error = f"{progress['failed']} 条用例失败(已达重试上限)" if progress["failed"] else ""
             finish_job(self.dsn, job.id, status, error)
-            update_run_metrics(self.dsn, job.run_id, self._aggregate_run_metrics(job.run_id, top_k))
+            update_run_metrics(
+                self.dsn, job.run_id,
+                self._aggregate_run_metrics(job.run_id, top_k, judge_enabled=judging is not None),
+            )
             self.log.info(
                 "job_finished", job_id=job.id, run_id=job.run_id, status=status, progress=progress
             )
@@ -304,13 +401,13 @@ class QueueRunner:
             )
         finally:
             retriever.close()
-            if owned_client is not None:
-                owned_client.close()
+            for client in owned_clients:
+                client.close()
 
     def _generation_from_snapshot(
             self, snapshot: dict[str, Any],
     ) -> tuple[_GenerationContext | None, ChatClient | None]:
-        """按配置快照决定本次任务是"检索 only"还是"检索 + 生成"(D14)。
+        """按配置快照决定本次任务是否做生成(D14)。
 
         快照里没有 generation 段 -> 只跑检索(历史 M2/M3 run 的语义);
         有 generation 段 -> 一律按**快照里记录的参数**执行, 不看 worker 的环境变量:
@@ -354,6 +451,73 @@ class QueueRunner:
         )
         return context, owned
 
+    def _judge_from_snapshot(
+            self, snapshot: dict[str, Any],
+    ) -> tuple[_JudgeContext | None, ChatClient | None]:
+        """按配置快照决定本次任务是否做 judge; 参数同样以快照为准(D14)。
+
+        两类 prompt 的必需占位符不同(claims 需要 contexts, rubric 不需要), 因此分别加载。
+        rubric 可通过快照的 enable_rubric/rubric_prompt_id 关闭 —— 关掉时只算幻觉率与支持率。
+        """
+        section = snapshot.get("judge")
+        if section is None:
+            return None, None
+        if not isinstance(section, dict):
+            raise JudgeSectionError(f"快照 judge 段类型不符: {type(section).__name__}")
+
+        model = str(section.get("model") or "").strip()
+        claims_prompt_id = str(section.get("claims_prompt_id") or "").strip()
+        if not model or not claims_prompt_id:
+            raise JudgeSectionError(f"快照 judge 段缺少 model/claims_prompt_id: {section}")
+
+        claims_prompt = self._injected_claims_prompt or load_prompt(
+            claims_prompt_id, required=CLAIMS_REQUIRED_PLACEHOLDERS
+        )
+        rubric_prompt: PromptTemplate | None = None
+        enable_rubric = bool(section.get("enable_rubric", True))
+        rubric_prompt_id = str(section.get("rubric_prompt_id") or "").strip()
+        if enable_rubric and rubric_prompt_id:
+            rubric_prompt = self._injected_rubric_prompt or load_prompt(
+                rubric_prompt_id, required=RUBRIC_REQUIRED_PLACEHOLDERS
+            )
+
+        client = self._injected_judge_client
+        owned: ChatClient | None = None
+        if client is None:
+            owned = ChatClient(
+                base_url=str(section.get("base_url") or self.settings.judge_base_url),
+                api_key=self.settings.resolved_judge_api_key,
+                model=model,
+                timeout=self.settings.judge_timeout_seconds,
+                max_retries=self.settings.generation_max_retries,
+            )
+            client = owned
+
+        cache: JudgeCache
+        if self._injected_judge_cache is not None:
+            cache = self._injected_judge_cache
+        elif self.settings.judge_use_cache:
+            cache = PostgresJudgeCache(self.dsn)
+        else:
+            cache = NullJudgeCache()
+
+        context = _JudgeContext(
+            client=client,
+            cache=cache,
+            claims_prompt=claims_prompt,
+            rubric_prompt=rubric_prompt,
+            provider=str(section.get("provider") or ""),
+            base_url=str(section.get("base_url") or ""),
+            model=model,
+            temperature=float(section.get("temperature") or 0.0),
+            max_tokens=int(section.get("max_tokens") or 1024),
+            max_claims=int(section.get("max_claims") or 12),
+            max_context_chars=int(section.get("max_context_chars") or 3000),
+            max_retries=self.settings.judge_max_retries,
+            concurrency=max(1, self.options.judge_concurrency),
+        )
+        return context, owned
+
     def _process_items(
             self,
             job: ClaimedJob,
@@ -364,12 +528,13 @@ class QueueRunner:
             retriever: Retriever,
             top_k: int,
             generation: _GenerationContext | None = None,
+            judging: _JudgeContext | None = None,
     ) -> tuple[int, int]:
-        """执行一批微任务: 批量向量化 + 批量检索 (+ 并行生成) + 逐条 checkpoint。
+        """执行一批微任务: 批量向量化 + 批量检索 (+ 并行生成) (+ 并行判定) + 逐条 checkpoint。
 
-        生成放在**写库之前**且整批并行: LLM 是这一环里唯一的慢操作(稳态 ~2.4s/题),
-        串行会让 60 题的 run 从 35s 变成 2 分钟以上; 而写库仍保持逐条串行,
-        避免并发事务争抢同一 job 的进度行。
+        LLM 是这一环里唯一的慢操作, 所以两个 LLM 阶段各自整批并行、写库仍逐条串行
+        (避免并发事务争抢同一 job 的进度行)。生成失败/判定失败的条目**不写库**,
+        交给 fail_item 走队列的重试与死信 —— 绝不写"半条结果"。
         """
         succeeded = 0
         dead = 0
@@ -401,11 +566,22 @@ class QueueRunner:
                     dead += 1
             return succeeded, dead
 
-        outcomes: list[GenerationOutcome] = (
+        generated: list[StageOutcome] = (
             self._generate_batch(generation, questions, responses)
             if generation is not None
             else [("disabled", None)] * len(valid_items)
         )
+        answers = [
+            payload.answer if tag == "ok" and isinstance(payload, GenerationResult) else None
+            for tag, payload in generated
+        ]
+        judged: list[StageOutcome] = (
+            self._judge_batch(judging, valid_items, questions, responses, answers)
+            if judging is not None
+            else [("disabled", None)] * len(valid_items)
+        )
+
+        thresholds = self._thresholds(top_k)
 
         for index, (item, hits) in enumerate(zip(valid_items, responses, strict=True)):
             qid = qid_by_case_id[item.case_id]
@@ -414,44 +590,67 @@ class QueueRunner:
                 {"point_id": h.point_id, "doc_id": h.doc_id, "score": round(h.score, 6)} for h in hits
             ]
 
-            generated: GenerationResult | None = None
-            tag, payload = outcomes[index]
-            if tag == "transient":
+            # ---- 生成阶段 ----
+            generation_result: GenerationResult | None = None
+            gen_tag, gen_payload = generated[index]
+            if gen_tag == "transient":
                 if not fail_item(
-                        self.dsn, job_id=job.id, item_id=item.id, error=f"生成失败: {payload}",
+                        self.dsn, job_id=job.id, item_id=item.id, error=f"生成失败: {gen_payload}",
                         max_retries=self.options.max_retries,
                 ):
                     dead += 1
                 continue
-            if tag == "fatal":
-                # 记一笔失败原因(不重试), 然后中止整个任务 —— 见 GenerationAborted 的说明
+            if gen_tag == "fatal":
                 fail_item(
-                    self.dsn, job_id=job.id, item_id=item.id, error=f"生成致命错误: {payload}",
+                    self.dsn, job_id=job.id, item_id=item.id, error=f"生成致命错误: {gen_payload}",
                     max_retries=1,
                 )
-                raise GenerationAborted(str(payload))
-            if tag == "ok":
-                assert isinstance(payload, GenerationResult)
-                generated = payload
+                raise LlmAborted(str(gen_payload))
+            if gen_tag == "ok":
+                assert isinstance(gen_payload, GenerationResult)
+                generation_result = gen_payload
+
+            # ---- 判定阶段 ----
+            judge_result: JudgeResult | None = None
+            judge_tag, judge_payload = judged[index]
+            if judge_tag == "transient":
+                if not fail_item(
+                        self.dsn, job_id=job.id, item_id=item.id, error=f"判定失败: {judge_payload}",
+                        max_retries=self.options.max_retries,
+                ):
+                    dead += 1
+                continue
+            if judge_tag == "fatal":
+                fail_item(
+                    self.dsn, job_id=job.id, item_id=item.id, error=f"判定致命错误: {judge_payload}",
+                    max_retries=1,
+                )
+                raise LlmAborted(str(judge_payload))
+            if judge_tag == "ok":
+                assert isinstance(judge_payload, JudgeResult)
+                judge_result = judge_payload
 
             metric = evaluate_case(qid, gold, [h.point_id for h in hits], top_k)
-            if metric is None:
-                # gold 为空: 检索侧不可评测, 记为 skipped 而不是失败;
-                # 但生成侧仍然有效(judge 只看答案与上下文), 所以答案照常落库。
-                complete_item(
-                    self.dsn, job_id=job.id, item_id=item.id, run_id=job.run_id, case_id=item.case_id,
-                    retrieved=retrieved, metrics={}, flags=["no_gold"],
-                    answer=generated.answer if generated else None,
-                    generation=generated.meta.to_json() if generated else None,
-                )
-                succeeded += 1
-                continue
+            # gold 为空: 检索侧不可评测(metrics 记 {}), 但生成/判定侧仍然有效
+            # (judge 只看答案与上下文), 所以结果照常落库, 由规则内核打上 no_gold。
+            metric_json = metric.to_json() if metric is not None else {}
+
+            # ---- 归因(M4-3, D16) ----
+            # flags 是"环节事实标签集", 已按优先级排好序 -> flags[0] 就是主因(不新增列)。
+            # 规则内核自己处理两种缺失: metric 为空 -> no_gold, judge 为空 -> 不出判定类标签,
+            # 所以这里不再手工拼 "no_gold" / "no_claims"(口径只在 attribution.py 一处)。
+            flags = attribute_case(
+                metric=metric_json,
+                judge=judge_result.to_json() if judge_result else None,
+                thresholds=thresholds,
+            )
             try:
                 complete_item(
                     self.dsn, job_id=job.id, item_id=item.id, run_id=job.run_id, case_id=item.case_id,
-                    retrieved=retrieved, metrics=metric.to_json(), flags=[],
-                    answer=generated.answer if generated else None,
-                    generation=generated.meta.to_json() if generated else None,
+                    retrieved=retrieved, metrics=metric_json, flags=flags,
+                    answer=generation_result.answer if generation_result else None,
+                    generation=generation_result.meta.to_json() if generation_result else None,
+                    judge=judge_result.to_json() if judge_result else None,
                 )
             except Exception as exc:  # noqa: BLE001 - 落库失败需记录并决定是否重试
                 if not fail_item(
@@ -468,14 +667,14 @@ class QueueRunner:
             generation: _GenerationContext,
             questions: list[str],
             responses: list[list[Any]],
-    ) -> list[GenerationOutcome]:
+    ) -> list[StageOutcome]:
         """整批并行生成; 错误按类型转成标记, 交给写库阶段决定"重试还是中止"。
 
         这里不做任何 DB 写 —— 生成阶段是纯计算+网络, 失败只记录不落库, 保证
         "写库 == 成功的生成 + 检索结果"这一不变式。
         """
 
-        def run_one(question: str, hits: list[Any]) -> GenerationOutcome:
+        def run_one(question: str, hits: list[Any]) -> StageOutcome:
             try:
                 result = generate_answer(
                     question=question,
@@ -494,22 +693,79 @@ class QueueRunner:
                 return "fatal", exc
             return "ok", result
 
-        workers = max(1, min(generation.concurrency, len(questions)))
+        return _run_parallel(generation.concurrency, run_one, questions, responses)
+
+    def _judge_batch(
+            self,
+            judging: _JudgeContext,
+            items: Sequence[ClaimedItem],
+            questions: list[str],
+            responses: list[list[Any]],
+            answers: list[str | None],
+    ) -> list[StageOutcome]:
+        """整批并行判定; 没有答案的条目标成 skip(生成失败时不该再白调一次模型)。"""
+
+        def run_one(index: int) -> StageOutcome:
+            answer = answers[index]
+            if not answer:
+                return "skip", None
+            try:
+                result = judge_case(
+                    question=questions[index],
+                    answer=answer,
+                    hits=responses[index],
+                    client=judging.client,
+                    claims_prompt=judging.claims_prompt,
+                    rubric_prompt=judging.rubric_prompt,
+                    cache=judging.cache,
+                    model=judging.model,
+                    provider=judging.provider,
+                    base_url=judging.base_url,
+                    temperature=judging.temperature,
+                    max_tokens=judging.max_tokens,
+                    max_claims=judging.max_claims,
+                    max_context_chars=judging.max_context_chars,
+                    max_retries=judging.max_retries,
+                )
+            except (JudgeFailed, LLMTransientError) as exc:
+                return "transient", exc
+            except (LLMFatalError, PromptError) as exc:
+                return "fatal", exc
+            return "ok", result
+
+        workers = max(1, min(judging.concurrency, len(items)))
         if workers == 1:
-            return [run_one(q, h) for q, h in zip(questions, responses, strict=True)]
+            return [run_one(index) for index in range(len(items))]
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(run_one, q, h) for q, h in zip(questions, responses, strict=True)]
+            futures = [pool.submit(run_one, index) for index in range(len(items))]
             return [future.result() for future in futures]
 
-    def _aggregate_run_metrics(self, run_id: int, top_k: int) -> dict[str, Any]:
+    def _aggregate_run_metrics(
+            self, run_id: int, top_k: int, *, judge_enabled: bool = False,
+    ) -> dict[str, Any]:
         """从 DB 读全部单题指标聚合(续跑场景下也能算全量, 不依赖内存态)。"""
         rows = list_case_metric_rows(self.dsn, run_id)
         metrics = [_to_case_metric(row) for row in rows if row]
         evaluated = [m for m in metrics if m is not None]
         skipped = len([row for row in rows if not row])
         result = aggregate(evaluated, top_k, skipped=skipped)
-        # 生成侧用量(D8 成本核算): 同样从 DB 聚合, 续跑/接管后不会算少
+        # 生成侧用量(D8 成本)
         result.update(get_generation_usage(self.dsn, run_id))
+        # judge 侧结果与用量(M4-2): 三个率的分母都是 claims_total, 三率之和 = 1
+        usage = get_judge_usage(self.dsn, run_id)
+        total = float(usage.get("claims_total") or 0)
+        judged_cases = float(usage.get("cases_judged") or 0)
+        result.update(usage)
+        result["claim_support_rate"] = round(float(usage.get("claims_supported") or 0) / total, 6) if total else 0.0
+        result["hallucination_rate"] = round(float(usage.get("claims_unsupported") or 0) / total, 6) if total else 0.0
+        result["irrelevant_rate"] = round(float(usage.get("claims_irrelevant") or 0) / total, 6) if total else 0.0
+        result["avg_claims_per_answer"] = round(total / judged_cases, 4) if judged_cases else 0.0
+        # 归因元信息(D15): 规则版本 + 覆盖范围 + 全部阈值。
+        # 放进 metrics 而不是快照: 快照参与 config_hash, 加段会让历史 run 的指纹全部失配,
+        # 而 metrics 本来就是"这次 run 实际发生了什么"(已有 k / token 用量)。
+        result["attribution"] = attribution_meta(
+            thresholds=self._thresholds(top_k), judge_enabled=judge_enabled,
+        )
         return result
 
     def _stopped_or_paused(self, processed: int) -> bool:
@@ -521,6 +777,21 @@ class QueueRunner:
         if self.options.max_items is None:
             return self.options.batch_size
         return max(1, min(self.options.batch_size, self.options.max_items - processed))
+
+
+def _run_parallel(
+        concurrency: int,
+        run_one: Callable[..., StageOutcome],
+        questions: list[str],
+        responses: list[list[Any]],
+) -> list[StageOutcome]:
+    """整批并行执行 run_one(question, hits); 并发数为 1 时退化为串行(便于调试)。"""
+    workers = max(1, min(concurrency, len(questions)))
+    if workers == 1:
+        return [run_one(q, h) for q, h in zip(questions, responses, strict=True)]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(run_one, q, h) for q, h in zip(questions, responses, strict=True)]
+        return [future.result() for future in futures]
 
 
 def _to_case_metric(row: dict[str, Any]) -> CaseMetric | None:

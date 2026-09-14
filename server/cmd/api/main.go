@@ -51,6 +51,18 @@ func main() {
 			MaxTokens:       cfg.GenerationMaxTokens,
 			MaxContextChars: cfg.GenerationMaxContextChars,
 		},
+		EvalJudge: eval.JudgeConfig{
+			Provider:        cfg.JudgeProvider,
+			BaseURL:         cfg.JudgeBaseURL,
+			Model:           cfg.JudgeModel,
+			ClaimsPromptID:  cfg.JudgeClaimsPromptID,
+			RubricPromptID:  cfg.JudgeRubricPromptID,
+			Temperature:     cfg.JudgeTemperature,
+			MaxTokens:       cfg.JudgeMaxTokens,
+			MaxContextChars: cfg.JudgeMaxContextChars,
+			EnableRubric:    cfg.JudgeEnableRubric,
+			MaxClaims:       cfg.JudgeMaxClaims,
+		},
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}

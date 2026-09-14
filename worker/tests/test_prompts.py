@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from app.generation.prompts import (
+    DEFAULT_REQUIRED_PLACEHOLDERS,
     EMPTY_CONTEXT_TEXT,
-    PLACEHOLDERS,
     PromptError,
     PromptTemplate,
     build_contexts,
@@ -48,7 +48,7 @@ def test_real_prompt_loads_and_has_required_parts() -> None:
 
     assert prompt.prompt_id == REAL_PROMPT_ID
     assert prompt.system and prompt.user
-    for name in PLACEHOLDERS:
+    for name in DEFAULT_REQUIRED_PLACEHOLDERS:
         assert "{" + name + "}" in prompt.user
     assert len(prompt.prompt_hash) == 16
     assert prompt.path.name == f"{REAL_PROMPT_ID}.md"
@@ -141,13 +141,28 @@ def test_missing_placeholder_is_rejected(tmp_path: Path) -> None:
     assert "contexts" in str(excinfo.value)
 
 
-def test_stray_braces_are_rejected_at_load_time(tmp_path: Path) -> None:
-    """花括号写错若留到运行时, 会表现为"生成失败"混进死信, 极难定位。"""
-    write_prompt(tmp_path, "bad", "[system]\ns\n\n[user]\n{contexts}\n{question}\n注意 {不要这样}\n")
+def test_unknown_placeholder_is_rejected_at_load_time(tmp_path: Path) -> None:
+    """占位符拼错若留到运行时, 会表现为"生成失败"混进死信, 极难定位。
+
+    注意: 只校验"形如 {name} 的标识符", 所以 prompt 里的 JSON 示例(如 {"claims":[]})
+    不会被误判 —— 这是 M4-2 引入 judge prompt 后的必要放宽。
+    """
+    write_prompt(tmp_path, "bad", "[system]\ns\n\n[user]\n{contexts}\n{question}\n注意 {anwser}\n")
 
     with pytest.raises(PromptError) as excinfo:
         load_prompt("bad", prompt_dir=tmp_path)
-    assert "花括号" in str(excinfo.value)
+    assert "未知占位符" in str(excinfo.value)
+
+
+def test_json_examples_inside_prompt_are_not_treated_as_placeholders(tmp_path: Path) -> None:
+    """judge prompt 必须能内嵌 JSON 示例(如 {"claims":[...]}) —— str.format 会在这里炸掉。"""
+    body = '[system]\ns\n\n[user]\n{contexts}\n{question}\n输出 {"claims":[{"id":1}]}\n'
+    write_prompt(tmp_path, "jsonish", body)
+    prompt = load_prompt("jsonish", prompt_dir=tmp_path)
+
+    rendered = prompt.render(contexts="资料", question="问题")[1]["content"]
+    assert '{"claims":[{"id":1}]}' in rendered, "JSON 示例必须原样保留"
+    assert "资料" in rendered and "问题" in rendered
 
 
 # ---- 上下文拼装 ----

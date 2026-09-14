@@ -1,4 +1,4 @@
-"""prompt 作为**版本化资产**(M4-1 S2)。
+"""prompt 作为**版本化资产**(M4-1 S2; M4-2 扩展占位符校验)。
 
 为什么 prompt 要进版本控制并算 hash:
 - 生成侧的所有结论都建立在"用了哪个 prompt"之上。换 prompt 就是换实验(D7), 所以
@@ -13,12 +13,22 @@
     ...系统提示...
 
     [user]
-    ...用户模板, 含 {contexts} 与 {question} 两个占位符...
+    ...用户模板, 含 {contexts}/{question}/{answer}/{reference_answer} 中的若干占位符...
 
-加载时会做两件校验(把错误挡在评测开始之前, 而不是第 37 道题上):
-1. 两个段都存在且非空;
-2. `{user}` 段除了两个约定占位符之外**没有其它花括号** —— 否则 `str.format` 会抛
-   KeyError/IndexError, 而那会伪装成"生成失败"混进死信里。
+M4-2 变更: 占位符从"固定两个"改为**按 prompt 声明**:
+- 生成 prompt 需要 {contexts} + {question}(默认 required);
+- judge 的 claims prompt 需要 {contexts} + {question} + {answer};
+- judge 的 rubric prompt 需要 {question} + {answer}(**不需要** contexts);
+  M4-2 的 rubric v2 额外用 {claims_summary}(断言核查结果) —— 它是**可选**占位符:
+  模板没声明就不传、也不进缓存键, 保证 v1 判定记录与旧缓存条目完全不受影响。
+渲染**不用 `str.format`**: judge 的 prompt 必须内嵌 JSON 示例(`{"claims":[...]}`),
+而 `str.format` 会把 `{"claims":...}` 当成字段名直接抛 KeyError。改为"**只替换白名单里的
+`{name}` 占位符, 其余花括号原样保留**", 于是 prompt 文件可以自由地写 JSON 示例。
+
+加载时仍挡住两类错误(把错误挡在评测开始之前, 而不是第 37 道题上):
+1. 必需占位符缺失;
+2. 出现**形如 `{name}` 但不在白名单**的占位符(如 `{anwser}` 拼错) —— 这类错误若留到运行时,
+   会以"生成/判定失败"的形式混进死信里, 极难定位。
 """
 from __future__ import annotations
 
@@ -26,13 +36,17 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 PROMPT_DIR = Path(__file__).resolve().parents[2] / "prompts"
 _SECTION_RE = re.compile(r"^\[(system|user)\]\s*$", re.MULTILINE)
-PLACEHOLDERS = ("contexts", "question")
+# 只认"形如 {name} 的整个标识符" —— 因此 {"claims":[...]} 这类 JSON 示例不会被误当作占位符
+_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+# 允许出现的占位符(白名单): 新增占位符时在此登记, 并在 load_prompt 的 required 里声明
+KNOWN_PLACEHOLDERS = ("contexts", "question", "answer", "reference_answer", "claims_summary")
+DEFAULT_REQUIRED_PLACEHOLDERS = ("contexts", "question")
 EMPTY_CONTEXT_TEXT = "（无检索结果）"
 
 
@@ -49,12 +63,28 @@ class PromptTemplate:
     user: str
     prompt_hash: str
     path: Path
+    # 该模板实际用到的占位符(按白名单顺序)与声明的必需项, 供 render 校验与排障
+    placeholders: tuple[str, ...] = field(default_factory=tuple)
+    required: tuple[str, ...] = DEFAULT_REQUIRED_PLACEHOLDERS
 
-    def render(self, *, question: str, contexts: str) -> list[dict[str, str]]:
-        """渲染成 OpenAI 兼容的 messages(可直接丢给 ChatClient)。"""
+    def render(self, **values: str) -> list[dict[str, str]]:
+        """渲染成 OpenAI 兼容的 messages(可直接丢给 ChatClient)。
+
+        只接受模板声明过的占位符; 缺值直接报错 —— 而不是渲染出 `{answer}` 字面量,
+        那会让模型把占位符当内容, 判出一堆莫名其妙的结论。
+        """
+        unknown = [name for name in values if name not in self.placeholders]
+        if unknown:
+            raise PromptError(
+                f"{self.prompt_id}: 传入了模板未使用的占位符 {unknown}; 模板用到的是 {self.placeholders}"
+            )
+        missing = [name for name in self.required if name not in values]
+        if missing:
+            raise PromptError(f"{self.prompt_id}: 缺少必需占位符 {missing}")
+        rendered = _PLACEHOLDER_RE.sub(lambda m: values.get(m.group(1), m.group(0)), self.user)
         return [
             {"role": "system", "content": self.system},
-            {"role": "user", "content": self.user.format(contexts=contexts, question=question)},
+            {"role": "user", "content": rendered},
         ]
 
 
@@ -79,7 +109,12 @@ def prompt_hash(system: str, user: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def load_prompt(prompt_id: str, *, prompt_dir: Path | None = None) -> PromptTemplate:
+def load_prompt(
+        prompt_id: str,
+        *,
+        prompt_dir: Path | None = None,
+        required: Sequence[str] = DEFAULT_REQUIRED_PLACEHOLDERS,
+) -> PromptTemplate:
     """按 id 加载 prompt(文件名即 id, 如 `qa_zh_v1` 对应 `prompts/qa_zh_v1.md`)。"""
     directory = prompt_dir or PROMPT_DIR
     path = directory / f"{prompt_id}.md"
@@ -95,21 +130,23 @@ def load_prompt(prompt_id: str, *, prompt_dir: Path | None = None) -> PromptTemp
 
     system = sections["system"].strip()
     user = sections["user"].strip()
-    _validate_placeholders(user, path)
+    placeholders = _validate_placeholders(user, path, required)
     return PromptTemplate(
         prompt_id=prompt_id,
         system=system,
         user=user,
         prompt_hash=prompt_hash(system, user),
         path=path,
+        placeholders=placeholders,
+        required=tuple(required),
     )
 
 
 def build_contexts(
-    hits: Iterable[Any],
-    max_chars: int,
-    *,
-    with_doc_id: bool = True,
+        hits: Iterable[Any],
+        max_chars: int,
+        *,
+        with_doc_id: bool = True,
 ) -> ContextBundle:
     """把检索结果按**排名顺序**拼成上下文文本, 按字符预算截断。
 
@@ -164,11 +201,16 @@ def _split_sections(raw: str) -> dict[str, str]:
     return sections
 
 
-def _validate_placeholders(user_template: str, path: Path) -> None:
-    for name in PLACEHOLDERS:
-        if "{" + name + "}" not in user_template:
-            raise PromptError(f"{path} 的 [user] 段缺少 {{{name}}} 占位符")
-    try:
-        user_template.format(**{name: "" for name in PLACEHOLDERS})
-    except (KeyError, IndexError, ValueError) as exc:
-        raise PromptError(f"{path} 的 [user] 段存在非法花括号(只允许 {{contexts}} 与 {{question}}): {exc}") from exc
+def _validate_placeholders(user_template: str, path: Path, required: Sequence[str]) -> tuple[str, ...]:
+    """返回模板实际用到的占位符(白名单顺序); 缺失必需项或出现未知占位符时报错。"""
+    found = {m.group(1) for m in _PLACEHOLDER_RE.finditer(user_template)}
+    unknown = sorted(found - set(KNOWN_PLACEHOLDERS))
+    if unknown:
+        raise PromptError(
+            f"{path} 的 [user] 段出现未知占位符 {unknown}(白名单: {KNOWN_PLACEHOLDERS})"
+        )
+    detected = tuple(name for name in KNOWN_PLACEHOLDERS if name in found)
+    missing = [name for name in required if name not in detected]
+    if missing:
+        raise PromptError(f"{path} 的 [user] 段缺少必需占位符: {missing}")
+    return detected

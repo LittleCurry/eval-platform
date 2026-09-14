@@ -120,6 +120,89 @@ func (g GenerationConfig) Validate() error {
 	return nil
 }
 
+// JudgeConfig 判定侧配置(M4-2; 与 worker 侧 build_judge_section 对齐)。
+//
+// 与 GenerationConfig 同样的 D14 规则: 只有启用了判定的 run 才会把它写进快照 ——
+// 为 nil 时不写 judge 键, 保证只跑检索/只做生成的历史 run 指纹不被作废。
+//
+// 两个 prompt id 分开: claims 与 rubric 是**两套**可独立演进的资产(各自的 hash 落在
+// case_results.judge.meta 里); max_claims 是成本护栏, 改了截断行为就变了, 也算实验参数。
+//
+// rubric 默认已是 v2(负控实验暴露 v1 缺陷后修订: v1 让通篇编造的答案也能拿 helpfulness=5)。
+type JudgeConfig struct {
+	Provider        string  `json:"provider"`
+	BaseURL         string  `json:"base_url"`
+	Model           string  `json:"model"`
+	ClaimsPromptID  string  `json:"claims_prompt_id"`
+	RubricPromptID  string  `json:"rubric_prompt_id"`
+	Temperature     float64 `json:"temperature"`
+	MaxTokens       int     `json:"max_tokens"`
+	MaxContextChars int     `json:"max_context_chars"`
+	EnableRubric    bool    `json:"enable_rubric"`
+	MaxClaims       int     `json:"max_claims"`
+}
+
+// DefaultJudge 与 worker 侧 JUDGE_* 默认值一致(SiliconFlow 的 DeepSeek, 复用同一个 key)。
+func DefaultJudge() JudgeConfig {
+	return JudgeConfig{
+		Provider:        "siliconflow",
+		BaseURL:         "https://api.siliconflow.cn/v1",
+		Model:           "deepseek-ai/DeepSeek-V3.2",
+		ClaimsPromptID:  "judge_claims_zh_v1",
+		RubricPromptID:  "judge_rubric_zh_v2",
+		Temperature:     0,
+		MaxTokens:       1024,
+		MaxContextChars: 3000,
+		EnableRubric:    true,
+		MaxClaims:       12,
+	}
+}
+
+// Validate 校验判定参数(提交时就挡住明显非法的配置)。
+func (g JudgeConfig) Validate() error {
+	if strings.TrimSpace(g.Provider) == "" {
+		return fmt.Errorf("judge.provider 必填")
+	}
+	if strings.TrimSpace(g.Model) == "" {
+		return fmt.Errorf("judge.model 必填")
+	}
+	if strings.TrimSpace(g.ClaimsPromptID) == "" {
+		return fmt.Errorf("judge.claims_prompt_id 必填(对应 worker/prompts/<id>.md)")
+	}
+	if g.EnableRubric && strings.TrimSpace(g.RubricPromptID) == "" {
+		return fmt.Errorf("judge.rubric_prompt_id 必填(启用 rubric 时)")
+	}
+	if g.Temperature < 0 || g.Temperature > 2 {
+		return fmt.Errorf("judge.temperature 应在 0~2 之间")
+	}
+	if g.MaxTokens <= 0 {
+		return fmt.Errorf("judge.max_tokens 必须为正整数")
+	}
+	if g.MaxContextChars <= 0 {
+		return fmt.Errorf("judge.max_context_chars 必须为正整数")
+	}
+	if g.MaxClaims <= 0 {
+		return fmt.Errorf("judge.max_claims 必须为正整数")
+	}
+	return nil
+}
+
+// judgeSection 生成快照里的 judge 段(指纹按键排序, 故字段顺序无关)。
+func judgeSection(g JudgeConfig) map[string]any {
+	return map[string]any{
+		"provider":          g.Provider,
+		"base_url":          g.BaseURL,
+		"model":             g.Model,
+		"claims_prompt_id":  g.ClaimsPromptID,
+		"rubric_prompt_id":  g.RubricPromptID,
+		"temperature":       normalizeFloat(g.Temperature),
+		"max_tokens":        g.MaxTokens,
+		"max_context_chars": g.MaxContextChars,
+		"enable_rubric":     g.EnableRubric,
+		"max_claims":        g.MaxClaims,
+	}
+}
+
 // normalizeFloat 把整数值的浮点转成 int, 使 JSON 输出为 `0` 而不是 `0.0`。
 //
 // 跨语言指纹的第一个浮点陷阱: Go 编出 `0`, Python 的 json 编出 `0.0` -> 同配置不同指纹。
@@ -155,6 +238,8 @@ type SnapshotInput struct {
 	Extras    map[string]any
 	// Generation 为 nil 表示"只跑检索"(不写 generation 键, 见 D14)。
 	Generation *GenerationConfig
+	// Judge 为 nil 表示"不做判定"(不写 judge 键, 同样见 D14)。
+	Judge *JudgeConfig
 }
 
 // BuildSnapshot 生成全量配置快照(结构必须与 worker 侧一致)。
@@ -189,6 +274,9 @@ func BuildSnapshot(in SnapshotInput) map[string]any {
 	}
 	if in.Generation != nil {
 		snapshot["generation"] = generationSection(*in.Generation)
+	}
+	if in.Judge != nil {
+		snapshot["judge"] = judgeSection(*in.Judge)
 	}
 	return snapshot
 }

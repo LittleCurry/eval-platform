@@ -9,16 +9,17 @@ import (
 
 // Deps 聚合 handler 所需依赖; store 以接口注入, 便于测试替换。
 type Deps struct {
-	Postgres      Pinger
-	Qdrant        Pinger
-	Projects      ProjectStore
-	Corpora       CorpusStore
-	Documents     DocumentStore
-	Datasets      DatasetStore
-	Cases         CaseStore
-	Runs          RunStore
+	Postgres       Pinger
+	Qdrant         Pinger
+	Projects       ProjectStore
+	Corpora        CorpusStore
+	Documents      DocumentStore
+	Datasets       DatasetStore
+	Cases          CaseStore
+	Runs           RunStore
 	EvalEmbedding  eval.EmbeddingConfig
 	EvalGeneration eval.GenerationConfig
+	EvalJudge      eval.JudgeConfig
 }
 
 // NewRouter 组装全部路由。
@@ -37,7 +38,7 @@ func NewRouter(d Deps) *gin.Engine {
 	documents := newDocumentHandler(d.Documents)
 	datasets := newDatasetHandler(d.Datasets)
 	cases := newCaseHandler(d.Cases)
-	runs := newRunHandler(d.Runs, d.EvalEmbedding, d.EvalGeneration)
+	runs := newRunHandler(d.Runs, d.EvalEmbedding, d.EvalGeneration, d.EvalJudge)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)

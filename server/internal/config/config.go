@@ -31,6 +31,18 @@ type Config struct {
 	GenerationTemperature     float64
 	GenerationMaxTokens       int
 	GenerationMaxContextChars int
+
+	// 判定侧默认值(M4-2): 与生成侧同样只在提交 run 时未给出字段时生效, 并写进配置快照
+	JudgeProvider        string
+	JudgeBaseURL         string
+	JudgeModel           string
+	JudgeClaimsPromptID  string
+	JudgeRubricPromptID  string
+	JudgeTemperature     float64
+	JudgeMaxTokens       int
+	JudgeMaxContextChars int
+	JudgeEnableRubric    bool
+	JudgeMaxClaims       int
 }
 
 // Load 从环境变量加载配置, 缺省时用默认值(与 compose.yaml 默认一致)。
@@ -56,6 +68,17 @@ func Load() Config {
 		GenerationTemperature:     getenvFloat("GENERATION_TEMPERATURE", 0),
 		GenerationMaxTokens:       getenvInt("GENERATION_MAX_TOKENS", 512),
 		GenerationMaxContextChars: getenvInt("GENERATION_MAX_CONTEXT_CHARS", 3000),
+
+		JudgeProvider:        getenv("JUDGE_PROVIDER", "siliconflow"),
+		JudgeBaseURL:         getenv("JUDGE_BASE_URL", "https://api.siliconflow.cn/v1"),
+		JudgeModel:           getenv("JUDGE_MODEL", "deepseek-ai/DeepSeek-V3.2"),
+		JudgeClaimsPromptID:  getenv("JUDGE_CLAIMS_PROMPT_ID", "judge_claims_zh_v1"),
+		JudgeRubricPromptID:  getenv("JUDGE_RUBRIC_PROMPT_ID", "judge_rubric_zh_v1"),
+		JudgeTemperature:     getenvFloat("JUDGE_TEMPERATURE", 0),
+		JudgeMaxTokens:       getenvInt("JUDGE_MAX_TOKENS", 1024),
+		JudgeMaxContextChars: getenvInt("JUDGE_MAX_CONTEXT_CHARS", 3000),
+		JudgeEnableRubric:    getenvBool("JUDGE_ENABLE_RUBRIC", true),
+		JudgeMaxClaims:       getenvInt("JUDGE_MAX_CLAIMS", 12),
 	}
 }
 
@@ -70,6 +93,18 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return def
+	}
+	return value
 }
 
 func getenvFloat(key string, def float64) float64 {

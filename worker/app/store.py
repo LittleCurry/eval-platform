@@ -40,6 +40,7 @@ class CaseResultRow:
     latency_ms: int | None = None
     answer: str | None = None
     generation: dict[str, Any] | None = None
+    judge: dict[str, Any] | None = None
 
 
 # ---- 读 ----
@@ -233,8 +234,9 @@ def save_case_results(dsn: str, run_id: int, rows: Iterable[CaseResultRow]) -> i
         for item in payload:
             cur.execute(
                 """
-                INSERT INTO case_results (run_id, case_id, retrieved, metrics, flags, latency_ms, answer, generation)
-                VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)
+                INSERT INTO case_results
+                (run_id, case_id, retrieved, metrics, flags, latency_ms, answer, generation, judge)
+                VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s::jsonb)
                     ON CONFLICT (run_id, case_id) DO UPDATE
                                                          SET retrieved  = EXCLUDED.retrieved,
                                                          metrics    = EXCLUDED.metrics,
@@ -242,6 +244,7 @@ def save_case_results(dsn: str, run_id: int, rows: Iterable[CaseResultRow]) -> i
                                                          latency_ms = EXCLUDED.latency_ms,
                                                          answer     = EXCLUDED.answer,
                                                          generation = EXCLUDED.generation,
+                                                         judge      = EXCLUDED.judge,
                                                          updated_at = now()
                 """,
                 (
@@ -253,6 +256,7 @@ def save_case_results(dsn: str, run_id: int, rows: Iterable[CaseResultRow]) -> i
                     item.latency_ms,
                     item.answer,
                     json.dumps(item.generation or {}, ensure_ascii=False),
+                    json.dumps(item.judge or {}, ensure_ascii=False),
                 ),
             )
     return len(payload)
@@ -267,7 +271,7 @@ def get_generation_usage(dsn: str, run_id: int) -> dict[str, int]:
         cur.execute(
             """
             SELECT count(*) FILTER (WHERE answer IS NOT NULL AND answer <> '') AS answers,
-                   COALESCE(sum(CASE WHEN generation ? 'prompt_tokens'
+                COALESCE(sum(CASE WHEN generation ? 'prompt_tokens'
                                      THEN (generation ->> 'prompt_tokens')::int END), 0) AS prompt_tokens,
                    COALESCE(sum(CASE WHEN generation ? 'completion_tokens'
                                      THEN (generation ->> 'completion_tokens')::int END), 0) AS completion_tokens
@@ -283,6 +287,66 @@ def get_generation_usage(dsn: str, run_id: int) -> dict[str, int]:
         "prompt_tokens": int(prompt_tokens or 0),
         "completion_tokens": int(completion_tokens or 0),
     }
+
+
+def get_judge_usage(dsn: str, run_id: int) -> dict[str, int | float]:
+    """汇总该 run 的 judge 侧结果与用量(M4-2), 用于写进 run.metrics。
+
+    口径(与 docs/reliability.md 的 D10 扩展一致):
+    - claims_total 是**所有可核查断言数**, 三个率的分母都是它(三率之和 = 1);
+    - 只统计 `judge.claims` 非空的题; 判定失败的题不写 judge, 也不会被算进来;
+    - cache 命中单独统计, 避免把"缓存省下的钱"误当成"没花钱"。
+
+    SQL 注意: claims 是数组, 直接在 case_results 上 JOIN LATERAL 展开会让 count(*)/sum()
+    **按 claim 数放大**(一道题 2 个 claim 会被算成 2 行、claims_total 算成 4)。
+    因此先在 LATERAL 子查询里把**每道题**的计数聚成一行, 再对题做聚合 —— 这样
+    count(*) 就是题数、avg 就是题均值。
+    """
+    with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(sum(claim_counts.total), 0)       AS claims_total,
+                COALESCE(sum(claim_counts.supported), 0)   AS claims_supported,
+                COALESCE(sum(claim_counts.unsupported), 0) AS claims_unsupported,
+                COALESCE(sum(claim_counts.irrelevant), 0)  AS claims_irrelevant,
+                count(*) FILTER (WHERE claim_counts.total > 0) AS cases_judged,
+                count(*) FILTER (WHERE cr.judge ? 'rubric')    AS rubric_cases,
+                COALESCE(sum((cr.judge -> 'meta' ->> 'claims_calls')::int), 0)  AS judge_claims_calls,
+                COALESCE(sum((cr.judge -> 'meta' ->> 'rubric_calls')::int), 0)  AS judge_rubric_calls,
+                COALESCE(sum((cr.judge -> 'meta' ->> 'claims_cache_hits')::int), 0)
+                    + COALESCE(sum((cr.judge -> 'meta' ->> 'rubric_cache_hits')::int), 0) AS judge_cache_hits,
+                COALESCE(sum((cr.judge -> 'meta' ->> 'prompt_tokens')::int), 0)     AS judge_prompt_tokens,
+                COALESCE(sum((cr.judge -> 'meta' ->> 'completion_tokens')::int), 0) AS judge_completion_tokens,
+                COALESCE(sum((cr.judge -> 'meta' ->> 'cache_saved_prompt_tokens')::int), 0)
+                    AS judge_cache_saved_prompt_tokens,
+                COALESCE(sum((cr.judge -> 'meta' ->> 'cache_saved_completion_tokens')::int), 0)
+                    AS judge_cache_saved_completion_tokens,
+                COALESCE(round(avg((cr.judge -> 'rubric' ->> 'relevance')::numeric), 4), 0)   AS relevance_avg,
+                COALESCE(round(avg((cr.judge -> 'rubric' ->> 'helpfulness')::numeric), 4), 0) AS helpfulness_avg
+            FROM case_results cr
+                     CROSS JOIN LATERAL (
+                SELECT count(*)                                        AS total,
+                       count(*) FILTER (WHERE c ->> 'label' = 'supported')   AS supported,
+                    count(*) FILTER (WHERE c ->> 'label' = 'unsupported') AS unsupported,
+                    count(*) FILTER (WHERE c ->> 'label' = 'irrelevant')  AS irrelevant
+                FROM jsonb_array_elements(COALESCE(cr.judge -> 'claims', '[]'::jsonb)) AS c
+                    ) AS claim_counts
+            WHERE cr.run_id = %s
+            """,
+            (run_id,),
+        )
+        row = cur.fetchone()
+
+    keys = (
+        "claims_total", "claims_supported", "claims_unsupported", "claims_irrelevant",
+        "cases_judged", "rubric_cases", "judge_claims_calls", "judge_rubric_calls",
+        "judge_cache_hits", "judge_prompt_tokens", "judge_completion_tokens",
+        "judge_cache_saved_prompt_tokens", "judge_cache_saved_completion_tokens",
+        "relevance_avg", "helpfulness_avg",
+    )
+    values = row if row else (0,) * len(keys)
+    return {key: float(value or 0) for key, value in zip(keys, values, strict=True)}
 
 
 def delete_run(dsn: str, run_id: int) -> None:

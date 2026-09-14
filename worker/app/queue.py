@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -151,17 +152,20 @@ def complete_item(
         latency_ms: int | None = None,
         answer: str | None = None,
         generation: dict[str, Any] | None = None,
+        judge: dict[str, Any] | None = None,
 ) -> None:
     """单条 case 完成(原子 checkpoint): 结果 + 状态 + 进度一起提交。
 
-    M4 起 answer 与生成元信息也走这**同一个事务** —— 生成不能"另起一个事务再补一笔",
-    否则崩溃时会留下"有答案没指标"或反之的半成品状态, 报告与归因都会失真。
+    M4 起 answer/generation(M4-1) 与 judge(M4-2) 也走这**同一个事务** ——
+    不能"另起一个事务再补一笔", 否则崩溃时会留下"有答案没指标"或"有判定没答案"的
+    半成品状态, 报告与归因都会失真。
     """
     with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO case_results (run_id, case_id, retrieved, metrics, flags, latency_ms, answer, generation)
-            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)
+            INSERT INTO case_results
+            (run_id, case_id, retrieved, metrics, flags, latency_ms, answer, generation, judge)
+            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s::jsonb)
                 ON CONFLICT (run_id, case_id) DO UPDATE
                                                      SET retrieved  = EXCLUDED.retrieved,
                                                      metrics    = EXCLUDED.metrics,
@@ -169,6 +173,7 @@ def complete_item(
                                                      latency_ms = EXCLUDED.latency_ms,
                                                      answer     = EXCLUDED.answer,
                                                      generation = EXCLUDED.generation,
+                                                     judge      = EXCLUDED.judge,
                                                      updated_at = now()
             """,
             (
@@ -180,6 +185,7 @@ def complete_item(
                 latency_ms,
                 answer,
                 _dumps(generation or {}),
+                _dumps(judge or {}),
             ),
         )
         cur.execute(
@@ -388,6 +394,82 @@ def list_case_metric_rows(dsn: str, run_id: int) -> list[dict[str, Any]]:
         )
         rows = cur.fetchall()
     return [_loads(r[0], {}) for r in rows]
+
+
+def list_case_signals(dsn: str, run_id: int) -> list[dict[str, Any]]:
+    """读取归因重算所需的单题信号: 指标 + 判定 + 现有标签。
+
+    与 list_case_metric_rows 分开: 那个只服务 run 级指标聚合, 这里要连 judge 一起取 ——
+    判定结论(claims/rubric)是幻觉类与质量类标签的唯一来源。
+    """
+    with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT cr.case_id, COALESCE(c.qid, ''), cr.metrics::text, cr.flags::text,
+                COALESCE(cr.judge::text, '{}')
+            FROM case_results cr
+                     LEFT JOIN cases c ON c.id = cr.case_id
+            WHERE cr.run_id = %s
+            ORDER BY cr.case_id
+            """,
+            (run_id,),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "case_id": row[0],
+            "qid": row[1],
+            "metrics": _loads(row[2], {}),
+            "flags": _loads(row[3], []),
+            "judge": _loads(row[4], {}),
+        }
+        for row in rows
+    ]
+
+
+def update_case_flags(dsn: str, run_id: int, flags_by_case_id: Mapping[int, Sequence[str]]) -> int:
+    """重算单题归因标签(M4-3 重算 CLI 用), 返回实际更新的行数。
+
+    只改 flags 一个字段: 检索指标、答案、判定都是"既有事实", 重算标签只是重新解释它们。
+    所以这里**绝不能**碰 config_snapshot / config_hash —— 那会让历史 run 的复现指纹失真。
+    """
+    if not flags_by_case_id:
+        return 0
+    payload = _dumps([
+        {"case_id": int(case_id), "flags": [str(flag) for flag in flags]}
+        for case_id, flags in flags_by_case_id.items()
+    ])
+    with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
+        # 一条语句完成全部更新(单次往返), rowcount 即真实命中行数
+        cur.execute(
+            """
+            UPDATE case_results AS cr
+            SET flags = v.flags, updated_at = now()
+                FROM jsonb_to_recordset(%s::jsonb) AS v(case_id bigint, flags jsonb)
+            WHERE cr.run_id = %s AND cr.case_id = v.case_id
+            """,
+            (payload, run_id),
+        )
+        return cur.rowcount
+
+
+def update_run_attribution(dsn: str, run_id: int, meta: Mapping[str, Any]) -> None:
+    """把归因元信息(规则版本/覆盖范围/阈值)浅合并进 runs.metrics.attribution(D15)。
+
+    用 `||` 合并而不是整块替换 metrics: 重算标签不该动 token 用量/检索指标等其它键,
+    否则"重算标签"会顺手改掉成本记录。
+    """
+    with psycopg.connect(dsn, connect_timeout=5) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE runs
+            SET metrics = COALESCE(metrics, '{}'::jsonb)
+                || jsonb_build_object('attribution', %s::jsonb),
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (_dumps(dict(meta)), run_id),
+        )
 
 
 def _dumps(value: Any) -> str:

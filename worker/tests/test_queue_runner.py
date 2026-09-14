@@ -1,24 +1,38 @@
 """QueueRunner 离线单测: 用 fake 队列 + fake 检索器验证编排逻辑(不碰 DB/网络)。
 
 覆盖: 正常跑完 / 单条失败与死信 / max_items 暂停并放回队列 / 索引缺失 / 空队列,
-以及 M4 生成链路(写库带上 answer 与元信息 / 空答案绝不落库 / 致命错误立刻中止任务)。
+M4-1 生成链路(写库带上 answer 与元信息 / 空答案绝不落库 / 致命错误立刻中止任务),
+以及 M4-2 judge 链路(快照驱动 / 判定失败可重试 / rubric 缺失降级 / 缓存复用 / 三率聚合)。
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
 from app.config import Settings
 from app.eval import queue_runner as qr
+from app.eval.attribution import ATTRIBUTION_VERSION
 from app.eval.queue_runner import QueueRunner, RunnerOptions
 from app.generation.prompts import load_prompt
+from app.judge.builtin import CLAIMS_REQUIRED_PLACEHOLDERS, RUBRIC_REQUIRED_PLACEHOLDERS
+from app.judge.cache import InMemoryJudgeCache
 from app.llm.client import ChatResult, LLMFatalError, LLMTransientError
 from app.metrics.retrieval import CaseMetric, aggregate
 from app.queue import ClaimedItem, ClaimedJob, RunContext
 from app.store import CaseRow, DocumentRow
 
 DOC = "# 线索回收\n\n超过 7 天无跟进会自动回收。\n\n## 上限\n\n每人默认 200 条。\n"
+
+# run 级 judge 用量的"空"形态(默认打桩值: 没有 judge 时聚合出来的就是这一组 0)
+JUDGE_USAGE_ZERO: dict[str, float] = {
+    "claims_total": 0, "claims_supported": 0, "claims_unsupported": 0, "claims_irrelevant": 0,
+    "cases_judged": 0, "rubric_cases": 0, "judge_claims_calls": 0, "judge_rubric_calls": 0,
+    "judge_cache_hits": 0, "judge_prompt_tokens": 0, "judge_completion_tokens": 0,
+    "judge_cache_saved_prompt_tokens": 0, "judge_cache_saved_completion_tokens": 0,
+    "relevance_avg": 0, "helpfulness_avg": 0,
+}
 
 
 class FakeQueue:
@@ -112,6 +126,7 @@ def patched(monkeypatch: pytest.MonkeyPatch):
             collection_exists_flag: bool = True,
             raise_on_search: bool = False,
             generation: dict[str, Any] | None = None,
+            judge: dict[str, Any] | None = None,
     ) -> tuple[FakeQueue, FakeRetriever]:
         fake_queue = FakeQueue(items)
         fake_retriever = FakeRetriever(hits, raise_on_search=raise_on_search)
@@ -130,6 +145,9 @@ def patched(monkeypatch: pytest.MonkeyPatch):
             qr, "get_generation_usage",
             lambda dsn, run_id: {"answers_generated": 0, "prompt_tokens": 0, "completion_tokens": 0},
         )
+        monkeypatch.setattr(
+            qr, "get_judge_usage", lambda dsn, run_id: JUDGE_USAGE_ZERO,
+        )
         monkeypatch.setattr(qr, "collection_exists", lambda client, name: collection_exists_flag)
         monkeypatch.setattr(
             qr, "get_run_context",
@@ -138,8 +156,9 @@ def patched(monkeypatch: pytest.MonkeyPatch):
                 config_snapshot={
                     "chunking": {"strategy": "headings", "chunk_size": 500, "overlap": 50, "min_chars": 80},
                     "retrieval": {"top_k": 5},
-                    # 只有带 generation 段的 run 才会跑生成(D14)
+                    # 只有带 generation / judge 段的 run 才会跑对应阶段(D14)
                     **({"generation": generation} if generation is not None else {}),
+                    **({"judge": judge} if judge is not None else {}),
                 },
             ),
         )
@@ -488,3 +507,372 @@ def test_blank_generation_prompt_in_snapshot_fails_fast(patched):
     assert summary.status == "failed"
     assert "生成配置错误" in fake_queue.finished[0][1]
     assert fake_queue.completed == []
+
+
+# ---- M4-2: judge 链路接入 ----
+
+OK_CLAIMS = json.dumps(
+    {"claims": [
+        {"id": 1, "text": "线索超过 7 天无跟进会被自动回收", "label": "supported",
+         "evidence": "超过 7 天无跟进会自动回收", "reason": "资料原文一致"},
+    ]},
+    ensure_ascii=False,
+)
+MIXED_CLAIMS = json.dumps(
+    {"claims": [
+        {"id": 1, "text": "线索超过 7 天无跟进会被自动回收", "label": "supported"},
+        {"id": 2, "text": "会通过企业微信通知原负责人", "label": "unsupported"},
+    ]},
+    ensure_ascii=False,
+)
+EMPTY_CLAIMS = '{"claims":[]}'
+OK_RUBRIC = json.dumps({"relevance": 4, "helpfulness": 3, "reason": "要点齐全"}, ensure_ascii=False)
+
+JUDGE_SECTION: dict[str, Any] = {
+    "provider": "siliconflow",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "fake-judge",
+    "claims_prompt_id": "judge_claims_zh_v1",
+    "rubric_prompt_id": "judge_rubric_zh_v1",
+    "temperature": 0.0,
+    "max_tokens": 1024,
+    "max_context_chars": 3000,
+    "enable_rubric": True,
+    "max_claims": 12,
+}
+
+
+class QueuedLLM:
+    """按顺序返回预置文本/异常的假客户端(judge 一问一答会调两次, 需要排队)。"""
+
+    def __init__(self, *responses: object, default: str = OK_CLAIMS) -> None:
+        self.queue = list(responses)
+        self.default = default
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, messages: list[dict[str, Any]], *, temperature: float = 0.0,
+                 max_tokens: int = 512) -> ChatResult:
+        self.calls.append({"messages": messages, "temperature": temperature, "max_tokens": max_tokens})
+        item = self.queue.pop(0) if self.queue else self.default
+        if isinstance(item, Exception):
+            raise item
+        return ChatResult(text=str(item), prompt_tokens=900, completion_tokens=60, latency_ms=1500,
+                          raw_model="fake-judge-raw")
+
+
+def make_judging_runner(
+        retriever: FakeRetriever,
+        gen_llm: FakeLLM,
+        judge_llm: QueuedLLM | None = None,
+        *,
+        judge_cache: InMemoryJudgeCache | None = None,
+        **options: Any,
+) -> QueueRunner:
+    """注入了 fake 生成 + fake judge 的 runner; prompt 用真实资产(快照只决定参数与开关)。"""
+    return QueueRunner(
+        Settings(_env_file=None),
+        RunnerOptions(**options),
+        retriever_factory=lambda settings, collection, top_k: retriever,
+        llm_client=gen_llm,
+        prompt=load_prompt("qa_zh_v1"),
+        judge_client=judge_llm if judge_llm is not None else QueuedLLM(),
+        judge_claims_prompt=load_prompt("judge_claims_zh_v1", required=CLAIMS_REQUIRED_PLACEHOLDERS),
+        judge_rubric_prompt=load_prompt("judge_rubric_zh_v1", required=RUBRIC_REQUIRED_PLACEHOLDERS),
+        judge_cache=judge_cache if judge_cache is not None else InMemoryJudgeCache(),
+    )
+
+
+def test_judge_is_skipped_when_snapshot_has_no_judge_section(patched):
+    """只启用生成时不应跑判定: judge 结果为空(None), 也不该多花钱。"""
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"}, generation=GENERATION_SECTION
+    )
+    judge_llm = QueuedLLM()
+
+    run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    assert judge_llm.calls == []
+    assert fake_queue.completed[0]["judge"] is None
+    assert fake_queue.completed[0]["answer"]
+
+
+def test_judge_writes_claims_rubric_and_meta(patched):
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    judge_llm = QueuedLLM(MIXED_CLAIMS, OK_RUBRIC)
+
+    summary = run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    assert summary.status == "succeeded"
+    payload = fake_queue.completed[0]["judge"]
+    assert [c["label"] for c in payload["claims"]] == ["supported", "unsupported"]
+    assert payload["rubric"] == {"relevance": 4, "helpfulness": 3, "reason": "要点齐全"}
+    meta = payload["meta"]
+    assert meta["judge_model"] == "fake-judge", "judge 模型来自快照"
+    assert meta["claims_prompt_id"] == "judge_claims_zh_v1"
+    assert meta["rubric_prompt_id"] == "judge_rubric_zh_v1"
+    assert meta["protocol_version"] == "v1"
+    assert meta["claims_calls"] == 1 and meta["rubric_calls"] == 1
+    assert len(judge_llm.calls) == 2, "每题两次调用: claims + rubric"
+    # 判定阶段必须同时看到答案与检索上下文(否则无法核对"是否被资料支持")
+    first_user_content = judge_llm.calls[0]["messages"][1]["content"]
+    assert "线索超过 7 天会被回收。" in first_user_content, "答案要进 prompt"
+    assert "线索超过 7 天无跟进会自动回收" in first_user_content, "检索上下文要进 prompt"
+
+
+def test_judge_section_without_generation_fails_fast(patched):
+    """没有答案就没有可核查对象: 这种快照是提交错误, 必须立刻说明而不是空跑一轮。"""
+    fake_queue, retriever = patched(
+        items=make_items(2), hits=["p1"], gold_ids={"p1"}, judge=JUDGE_SECTION
+    )
+
+    summary = run_job(make_judging_runner(retriever, FakeLLM()))
+
+    assert summary.status == "failed"
+    assert "没有 generation" in fake_queue.finished[0][1]
+    assert fake_queue.completed == [] and fake_queue.failed == []
+
+
+def test_judge_fatal_error_aborts_job_and_releases_items(patched):
+    """judge 的 402/401 与生成一样: 立刻中止任务并归位孤儿条目, 不刷死信。"""
+    fake_queue, retriever = patched(
+        items=make_items(4), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    judge_llm = QueuedLLM(LLMFatalError("HTTP 402: account balance is insufficient"))
+
+    summary = run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    assert summary.status == "failed"
+    assert fake_queue.completed == []
+    assert len(fake_queue.failed) == 1, "只记当前这一条"
+    assert "402" in fake_queue.finished[0][1]
+    assert fake_queue.released_running == [7]
+
+
+def test_judge_protocol_failure_is_retryable_not_persisted(patched):
+    """判定不出来就让该条失败(可重试); 绝不写一份空判定进库。"""
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    judge_llm = QueuedLLM("不是 JSON", "还不是 JSON", "仍然不是 JSON")
+
+    run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    assert fake_queue.completed == [], "判定失败不得落库"
+    assert "判定失败" in fake_queue.failed[0]["error"]
+    assert fake_queue.failed[0]["max_retries"] == 3, "协议失败属可重试(由队列退避)"
+    assert len(judge_llm.calls) == 3, "judge 内部按 judge_max_retries 重试满"
+
+
+def test_judge_transient_error_keeps_item_retryable(patched):
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    judge_llm = QueuedLLM(LLMTransientError("HTTP 429: rate limited"))
+
+    run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    assert fake_queue.completed == []
+    assert "429" in fake_queue.failed[0]["error"]
+    assert fake_queue.failed[0]["max_retries"] == 3
+
+
+def test_judge_uses_snapshot_parameters_not_worker_env(patched):
+    """D14 红线: judge 的模型/温度/claims 上限都来自快照。"""
+    section = dict(JUDGE_SECTION, model="snapshot-judge", temperature=0.7, max_claims=3)
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=section,
+    )
+    judge_llm = QueuedLLM(MIXED_CLAIMS, OK_RUBRIC)
+
+    run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    meta = fake_queue.completed[0]["judge"]["meta"]
+    assert meta["judge_model"] == "snapshot-judge"
+    assert meta["temperature"] == 0.7
+    assert meta["max_claims"] == 3
+    assert judge_llm.calls[0]["temperature"] == 0.7, "温度必须真的传给模型"
+
+
+def test_judge_rubric_can_be_disabled_from_snapshot(patched):
+    """rubric 由快照开关控制: 关掉时只算幻觉率/支持率, 不产生无谓调用。"""
+    section = dict(JUDGE_SECTION, enable_rubric=False)
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=section,
+    )
+    judge_llm = QueuedLLM(OK_CLAIMS)
+
+    run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    payload = fake_queue.completed[0]["judge"]
+    assert payload["rubric"] is None
+    assert payload["meta"]["rubric_enabled"] is False
+    assert "未启用 rubric" in payload["meta"]["rubric_skipped_reason"]
+    assert len(judge_llm.calls) == 1
+
+
+def test_no_claims_answer_is_flagged(patched):
+    """答案只说"资料中未提及"时没有可核查断言: 合法结果, 但要打标便于报告筛选。
+
+    这里打分必须**达标**(5/4): 打分低于达标线时会额外带上 generation_quality
+    (见 test_no_claims_with_bad_rubric_is_flagged_as_quality), 本用例只验"无断言"这一件事。
+    """
+    good_rubric = json.dumps(
+        {"relevance": 5, "helpfulness": 4, "reason": "资料里确实没有相关信息, 拒答是对的"},
+        ensure_ascii=False,
+    )
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    judge_llm = QueuedLLM(EMPTY_CLAIMS, good_rubric)
+
+    summary = run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    assert summary.status == "succeeded"
+    assert fake_queue.completed[0]["judge"]["claims"] == []
+    assert fake_queue.completed[0]["flags"] == ["no_claims"]
+
+
+def test_judge_metrics_rates_are_aggregated(patched, monkeypatch: pytest.MonkeyPatch):
+    """三个率的分母都是 claims_total(三率之和 = 1), 另加均值与 token 用量。"""
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    monkeypatch.setattr(qr, "get_judge_usage", lambda dsn, run_id: {
+        **JUDGE_USAGE_ZERO,
+        "claims_total": 10, "claims_supported": 6, "claims_unsupported": 3, "claims_irrelevant": 1,
+        "cases_judged": 4, "judge_claims_calls": 4, "judge_rubric_calls": 4,
+        "judge_cache_hits": 2, "judge_prompt_tokens": 3600, "judge_completion_tokens": 240,
+    })
+
+    run_job(make_judging_runner(retriever, FakeLLM()))
+
+    metrics = fake_queue.metrics_updates[0]
+    assert metrics["claim_support_rate"] == 0.6
+    assert metrics["hallucination_rate"] == 0.3
+    assert metrics["irrelevant_rate"] == 0.1
+    assert abs(
+        metrics["claim_support_rate"] + metrics["hallucination_rate"] + metrics["irrelevant_rate"] - 1.0
+    ) < 1e-9, "三率之和必须为 1(口径自洽的硬校验)"
+    assert metrics["avg_claims_per_answer"] == 2.5
+    assert metrics["judge_cache_hits"] == 2
+    assert metrics["recall_at_k"] == 0.5, "judge 不影响检索侧指标"
+
+
+def test_judge_rates_are_zero_when_no_claims(patched):
+    """没有任何 claim 时三率都为 0, 不能出现除零或 NaN。"""
+    fake_queue, retriever = patched(items=make_items(1), hits=["p1"], gold_ids={"p1"})
+
+    run_job(make_judging_runner(retriever, FakeLLM()))
+
+    metrics = fake_queue.metrics_updates[0]
+    assert metrics["claim_support_rate"] == 0.0
+    assert metrics["hallucination_rate"] == 0.0
+    assert metrics["avg_claims_per_answer"] == 0.0
+
+
+def test_judge_cache_is_reused_across_runs(patched):
+    """同一批数据重跑: 判定应命中缓存(零调用), 这正是 judge 结果可复现的手段。"""
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    cache = InMemoryJudgeCache()
+    judge_llm = QueuedLLM(MIXED_CLAIMS, OK_RUBRIC)
+    runner = make_judging_runner(retriever, FakeLLM(), judge_llm, judge_cache=cache)
+
+    run_job(runner)                     # 第一次: 两次真实调用
+    assert len(judge_llm.calls) == 2
+    fake_queue.pending = make_items(1)  # 把条目放回队列, 模拟"同一批数据重跑"
+    run_job(runner)                     # 第二次: 判定应全部命中缓存
+
+    assert len(judge_llm.calls) == 2, "命中缓存时不该再调模型"
+    second = fake_queue.completed[1]["judge"]
+    assert second["meta"]["claims_cache_hits"] == 1
+    assert second["meta"]["rubric_cache_hits"] == 1
+    assert second["meta"]["prompt_tokens"] == 0
+    assert second["meta"]["cache_saved_prompt_tokens"] == 900 * 2
+
+# ---- M4-3: 归因标签接入 ----
+
+def test_no_claims_with_bad_rubric_is_flagged_as_quality(patched):
+    """检索到位、答案没拆出断言、打分又低于达标线 -> 主因是生成质量(而不是"无断言")。
+
+    这是"拒答"场景的正确归因: 证据就在上下文里, 模型却什么都没答, 属于生成侧问题。
+    """
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+    judge_llm = QueuedLLM(EMPTY_CLAIMS, OK_RUBRIC)  # helpfulness=3, 恰好在默认达标线上
+
+    run_job(make_judging_runner(retriever, FakeLLM(), judge_llm))
+
+    assert fake_queue.completed[0]["flags"] == ["generation_quality", "no_claims"]
+
+
+def test_retrieval_only_run_never_gets_judge_flags(patched):
+    """只跑检索的 run: 归因只覆盖检索环节, 绝不产出幻觉/质量标签(D16 降级矩阵)。"""
+    fake_queue, retriever = patched(items=make_items(1), hits=["p9"], gold_ids={"p1"})
+
+    run_job(make_runner(retriever))
+
+    assert fake_queue.completed[0]["judge"] is None
+    assert fake_queue.completed[0]["flags"] == ["retrieval_miss"]
+    assert fake_queue.metrics_updates[0]["attribution"]["scope"] == "retrieval"
+
+
+def test_low_rank_hit_is_flagged(patched):
+    """gold 命中了但排在第 4 位(k=5 -> 阈值 3): 记"排序靠后", 这是 reranker 的用武之地。"""
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p9", "p8", "p7", "p1"], gold_ids={"p1"}
+    )
+
+    run_job(make_runner(retriever))
+
+    flags = fake_queue.completed[0]["flags"]
+    assert flags == ["retrieval_low_rank"]
+    assert fake_queue.completed[0]["metrics"]["first_hit_rank"] == 4
+
+
+def test_attribution_meta_is_recorded_in_run_metrics(patched):
+    """D15: 规则版本 + 覆盖范围 + 全部阈值必须随 run 落库, 否则跨 run 的标签数不可比。"""
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+
+    run_job(make_judging_runner(retriever, FakeLLM(), QueuedLLM(OK_CLAIMS, OK_RUBRIC)))
+
+    assert fake_queue.metrics_updates[0]["attribution"] == {
+        "version": ATTRIBUTION_VERSION,
+        "scope": "retrieval+judge",
+        "k": 5,
+        "low_rank_limit": 3,
+        "low_rank_ratio": 0.5,
+        "quality_line": 3,
+    }
+
+
+def test_quality_line_option_changes_flags_and_meta(patched):
+    """达标线可由 RunnerOptions 覆盖(CLI --quality-line), 且覆盖后的值同样落进 metrics。"""
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"},
+        generation=GENERATION_SECTION, judge=JUDGE_SECTION,
+    )
+
+    run_job(make_judging_runner(
+        retriever, FakeLLM(), QueuedLLM(OK_CLAIMS, OK_RUBRIC), quality_line=2,
+    ))
+
+    assert fake_queue.completed[0]["flags"] == [], "helpfulness=3 > 达标线 2 -> 不算质量不达标"
+    assert fake_queue.metrics_updates[0]["attribution"]["quality_line"] == 2

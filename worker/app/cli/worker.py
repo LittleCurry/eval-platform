@@ -6,11 +6,13 @@
     python -m app.cli.worker --once --job-id 19    # 只跑指定任务(重跑/调试)
     python -m app.cli.worker --once --max-items 5  # 只跑 5 条, 其余放回队列(验证续跑)
     python -m app.cli.worker --reclaim-once        # 只做一次僵尸任务接管(运维/演练)
-    python -m app.cli.worker --once --job-id 12 --generation-concurrency 4
+    python -m app.cli.worker --once --job-id 12 --generation-concurrency 4 --judge-concurrency 4
+    python -m app.cli.worker --once --job-id 12 --quality-line 4   # 归因达标线(M4-3, 会记进 run.metrics)
 
-是否跑生成**不由 CLI 决定**, 而是看该 run 的配置快照里有没有 generation 段(D14):
-提交时带 `"generation": {...}` 即启用, 参数(模型/prompt/温度/预算)以快照为准 ——
-这样"跑过的实验"与"记录的配置"永远一致。
+是否跑生成/判定**不由 CLI 决定**, 而是看该 run 的配置快照里有没有 generation / judge 段(D14):
+提交时带 `"generation": {...}` / `"judge": {...}` 即启用, 参数(模型/prompt/温度/预算)以快照为准 ——
+这样"跑过的实验"与"记录的配置"永远一致。CLI 只提供**执行资源**旋钮(并发数 / 归因阈值),
+它们不影响检索与判定的结果, 且归因阈值会被原样写进 runs.metrics.attribution(D15)以便事后解释标签。
 
 输出: 每个任务的 JSON 摘要(含 processed/succeeded/failed/elapsed_ms)。
 """
@@ -22,8 +24,20 @@ import signal
 import sys
 
 from app.config import Settings
+from app.eval.attribution import DEFAULT_LOW_RANK_RATIO, DEFAULT_QUALITY_LINE
 from app.eval.queue_runner import QueueRunner, RunnerOptions
 from app.logging_conf import setup_logging
+
+
+def _ratio(value: str) -> float:
+    """argparse 类型校验: 归因的 low_rank_ratio 必须落在 (0, 1]。"""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"需要 0-1 之间的小数, 收到 {value}") from exc
+    if not 0.0 < parsed <= 1.0:
+        raise argparse.ArgumentTypeError(f"需要落在 (0, 1], 收到 {value}")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,10 +55,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reclaim-once", action="store_true", help="只执行一次僵尸任务接管后退出")
     parser.add_argument("--batch-pause-ms", type=float, default=0.0, help="批次间暂停毫秒数(演练用)")
-    # ---- M4: 生成链路 ----
+    # ---- M4: 生成 / judge 的执行资源(实验参数在快照里, 这里只调并发) ----
     parser.add_argument(
         "--generation-concurrency", type=int, default=4,
         help="同批次内并行生成数(实测单题稳态 ~2.4s, 4 并发足够且不易触发限流)",
+    )
+    parser.add_argument(
+        "--judge-concurrency", type=int, default=4,
+        help="同批次内并行判定数(judge 每案例 2 次调用, 与生成共用同一供应商配额)",
+    )
+    # ---- M4-3: 归因阈值(打标口径; 落进 runs.metrics.attribution 可追溯) ----
+    parser.add_argument(
+        "--quality-line", type=int, default=DEFAULT_QUALITY_LINE, choices=range(1, 6),
+        metavar="{1..5}",
+        help="helpfulness/relevance <= 该值记为生成质量不达标(1-5, 默认 3)",
+    )
+    parser.add_argument(
+        "--low-rank-ratio", type=_ratio, default=DEFAULT_LOW_RANK_RATIO,
+        help="首个命中排位 > ceil(k*ratio) 记为排序靠后(默认 0.5, k=5 -> 排位>3)",
     )
     return parser
 
@@ -63,6 +91,9 @@ def main(argv: list[str] | None = None) -> int:
         stale_timeout_seconds=args.stale_timeout,
         batch_pause_ms=args.batch_pause_ms,
         generation_concurrency=args.generation_concurrency,
+        judge_concurrency=args.judge_concurrency,
+        quality_line=args.quality_line,
+        low_rank_ratio=args.low_rank_ratio,
     )
     runner = QueueRunner(settings, options)
 

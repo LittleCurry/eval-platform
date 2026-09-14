@@ -18,16 +18,25 @@ type runHandler struct {
 	store      RunStore
 	embedding  eval.EmbeddingConfig
 	generation eval.GenerationConfig
+	judge      eval.JudgeConfig
 }
 
-func newRunHandler(s RunStore, embedding eval.EmbeddingConfig, generation eval.GenerationConfig) *runHandler {
+func newRunHandler(
+	s RunStore,
+	embedding eval.EmbeddingConfig,
+	generation eval.GenerationConfig,
+	judge eval.JudgeConfig,
+) *runHandler {
 	if embedding.Provider == "" {
 		embedding = eval.DefaultEmbedding()
 	}
 	if generation.Provider == "" {
 		generation = eval.DefaultGeneration()
 	}
-	return &runHandler{store: s, embedding: embedding, generation: generation}
+	if judge.Provider == "" {
+		judge = eval.DefaultJudge()
+	}
+	return &runHandler{store: s, embedding: embedding, generation: generation, judge: judge}
 }
 
 // queryInt 读取整型查询参数; 缺失或非法时用默认值。
@@ -180,6 +189,23 @@ type submitRunGeneration struct {
 	MaxContextChars *int     `json:"max_context_chars"`
 }
 
+// submitRunJudge 提交时的判定配置(M4-2)。字段同样用**指针**区分"没传"与"显式传了 0/false":
+// temperature=0 与 enable_rubric=false 都是有意义的取值, 用零值判断会被默认值覆盖。
+// 对象存在 = 启用判定(D14: 此时才会往快照里写 judge 段); 注意判定必须有答案,
+// 因此提交侧要求同时启用 generation。
+type submitRunJudge struct {
+	Provider        string   `json:"provider"`
+	BaseURL         string   `json:"base_url"`
+	Model           string   `json:"model"`
+	ClaimsPromptID  string   `json:"claims_prompt_id"`
+	RubricPromptID  string   `json:"rubric_prompt_id"`
+	Temperature     *float64 `json:"temperature"`
+	MaxTokens       *int     `json:"max_tokens"`
+	MaxContextChars *int     `json:"max_context_chars"`
+	EnableRubric    *bool    `json:"enable_rubric"`
+	MaxClaims       *int     `json:"max_claims"`
+}
+
 type submitRunReq struct {
 	DatasetID  int64                `json:"dataset_id"`
 	CorpusID   int64                `json:"corpus_id"`
@@ -187,6 +213,7 @@ type submitRunReq struct {
 	TopK       int                  `json:"top_k"`
 	Chunking   *submitRunChunking   `json:"chunking"`
 	Generation *submitRunGeneration `json:"generation"`
+	Judge      *submitRunJudge      `json:"judge"`
 }
 
 // resolveGeneration 把请求里的生成配置与服务端默认值合并并校验; 未启用时返回 nil。
@@ -215,6 +242,48 @@ func (h *runHandler) resolveGeneration(req *submitRunGeneration) (*eval.Generati
 	}
 	if req.MaxContextChars != nil {
 		config.MaxContextChars = *req.MaxContextChars
+	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+// resolveJudge 把请求里的判定配置与服务端默认值合并并校验; 未启用时返回 nil。
+func (h *runHandler) resolveJudge(req *submitRunJudge) (*eval.JudgeConfig, error) {
+	if req == nil {
+		return nil, nil
+	}
+	config := h.judge // 服务端默认(来自 JUDGE_* 环境变量)
+	if value := strings.TrimSpace(req.Provider); value != "" {
+		config.Provider = value
+	}
+	if value := strings.TrimSpace(req.BaseURL); value != "" {
+		config.BaseURL = value
+	}
+	if value := strings.TrimSpace(req.Model); value != "" {
+		config.Model = value
+	}
+	if value := strings.TrimSpace(req.ClaimsPromptID); value != "" {
+		config.ClaimsPromptID = value
+	}
+	if value := strings.TrimSpace(req.RubricPromptID); value != "" {
+		config.RubricPromptID = value
+	}
+	if req.Temperature != nil {
+		config.Temperature = *req.Temperature
+	}
+	if req.MaxTokens != nil {
+		config.MaxTokens = *req.MaxTokens
+	}
+	if req.MaxContextChars != nil {
+		config.MaxContextChars = *req.MaxContextChars
+	}
+	if req.EnableRubric != nil {
+		config.EnableRubric = *req.EnableRubric
+	}
+	if req.MaxClaims != nil {
+		config.MaxClaims = *req.MaxClaims
 	}
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -268,6 +337,18 @@ func (h *runHandler) Submit(c *gin.Context) {
 		return
 	}
 
+	// 判定配置: 未传 judge 对象 = 不做判定
+	judge, err := h.resolveJudge(req.Judge)
+	if err != nil {
+		writeErr(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if judge != nil && generation == nil {
+		// 没有答案就没有可核查的对象: 与其让 worker 跑到一半失败, 不如提交时就拒绝
+		writeErr(c, http.StatusBadRequest, "启用 judge 时必须同时启用 generation(判定需要有答案)")
+		return
+	}
+
 	ctx := c.Request.Context()
 	projectID := req.ProjectID
 	if projectID <= 0 {
@@ -291,6 +372,7 @@ func (h *runHandler) Submit(c *gin.Context) {
 		DatasetID:  req.DatasetID,
 		TopK:       req.TopK,
 		Generation: generation,
+		Judge:      judge,
 	})
 	configHash, err := eval.SnapshotHash(snapshot)
 	if err != nil {
@@ -335,7 +417,8 @@ func (h *runHandler) Submit(c *gin.Context) {
 		"config_hash":        configHash,
 		"chunking_hash":      chunkingHash,
 		"generation_enabled": generation != nil,
-		"collection":    eval.CollectionName(req.CorpusID, chunkingHash),
+		"judge_enabled":      judge != nil,
+		"collection":         eval.CollectionName(req.CorpusID, chunkingHash),
 	})
 }
 

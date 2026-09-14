@@ -24,6 +24,7 @@ import sys
 from typing import Any
 
 from app.config import Settings
+from app.eval.attribution import Thresholds, attribute_case, attribution_meta
 from app.eval.snapshot import build_config_snapshot, git_sha, snapshot_hash
 from app.logging_conf import setup_logging
 from app.metrics.retrieval import CaseMetric, aggregate, evaluate_case
@@ -133,6 +134,9 @@ def main(argv: list[str] | None = None) -> int:
 
         evaluable = [row for row in case_rows if gold_by_qid.get(row.qid)]
         responses = retriever.search_many([row.question for row in evaluable])
+        # M4-3: 归因口径只有一处实现(attribution.py), 这条老路径也只跑检索 ->
+        # 只可能产出检索类标签(judge=None 让判定类标签一律不出), 与队列路径完全一致。
+        thresholds = Thresholds(k=args.top_k)
 
         for row, hits in zip(evaluable, responses, strict=True):
             gold = gold_by_qid[row.qid]
@@ -156,7 +160,11 @@ def main(argv: list[str] | None = None) -> int:
                         for h in hits
                     ],
                     "metrics": metric.to_json(),
-                    "flags": [],  # M4 起写入 retrieval_miss / hallucination 等归因标签
+                    "flags": attribute_case(
+                        metric=metric.to_json(),
+                        judge=None,  # 只跑检索: 没有判定信号, 判定类标签不出(降级矩阵)
+                        thresholds=thresholds,
+                    ),
                 }
             )
     except Exception as exc:  # 落库场景下必须把失败写进 run, 不能只抛栈
@@ -168,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
 
     skipped = len(case_rows) - len(case_metrics)
     metrics = aggregate(case_metrics, args.top_k, skipped=skipped)
+    # 归因口径随 run 一起记录(D15): 只跑检索 -> scope=retrieval
+    metrics["attribution"] = attribution_meta(thresholds=thresholds, judge_enabled=False)
 
     if run_id is not None:
         rows = [
