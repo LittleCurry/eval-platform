@@ -111,6 +111,7 @@ def patched(monkeypatch: pytest.MonkeyPatch):
             gold_ids: set[str],
             collection_exists_flag: bool = True,
             raise_on_search: bool = False,
+            generation: dict[str, Any] | None = None,
     ) -> tuple[FakeQueue, FakeRetriever]:
         fake_queue = FakeQueue(items)
         fake_retriever = FakeRetriever(hits, raise_on_search=raise_on_search)
@@ -137,6 +138,8 @@ def patched(monkeypatch: pytest.MonkeyPatch):
                 config_snapshot={
                     "chunking": {"strategy": "headings", "chunk_size": 500, "overlap": 50, "min_chars": 80},
                     "retrieval": {"top_k": 5},
+                    # 只有带 generation 段的 run 才会跑生成(D14)
+                    **({"generation": generation} if generation is not None else {}),
                 },
             ),
         )
@@ -308,20 +311,32 @@ class FakeLLM:
                           raw_model="fake-deepseek")
 
 
-def make_generating_runner(retriever: FakeRetriever, llm: FakeLLM, **options: Any) -> QueueRunner:
-    """注入了 fake 检索器 + fake 生成客户端 + 真实 prompt 资产的 runner。"""
-    opts = RunnerOptions(generate=True, **options)
+GENERATION_SECTION: dict[str, Any] = {
+    "provider": "siliconflow",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "fake-deepseek",
+    "prompt_id": "qa_zh_v1",
+    "temperature": 0.0,
+    "max_tokens": 512,
+    "max_context_chars": 3000,
+}
+
+
+def make_generating_runner(
+        retriever: FakeRetriever, llm: FakeLLM, *, prompt_id: str = "qa_zh_v1", **options: Any
+) -> QueueRunner:
+    """注入了 fake 生成客户端的 runner; prompt 从快照的 prompt_id 加载(真实资产)。"""
     return QueueRunner(
         Settings(_env_file=None),
-        opts,
+        RunnerOptions(**options),
         retriever_factory=lambda settings, collection, top_k: retriever,
         llm_client=llm,
-        prompt=load_prompt("qa_zh_v1"),
+        prompt=load_prompt(prompt_id),
     )
 
 
-def test_generation_is_disabled_by_default(patched):
-    """向后兼容: 不传 --generate 时行为与 M3 完全一致(没有 answer/元信息)。"""
+def test_retrieval_only_when_snapshot_has_no_generation(patched):
+    """快照没有 generation 段 = 只跑检索: 行为与 M3 完全一致(没有 answer/元信息)。"""
     fake_queue, retriever = patched(items=make_items(1), hits=["p1"], gold_ids={"p1"})
     summary = run_job(make_runner(retriever))
 
@@ -331,7 +346,9 @@ def test_generation_is_disabled_by_default(patched):
 
 
 def test_generate_writes_answer_and_metadata(patched):
-    fake_queue, retriever = patched(items=make_items(2), hits=["p1"], gold_ids={"p1"})
+    fake_queue, retriever = patched(
+        items=make_items(2), hits=["p1"], gold_ids={"p1"}, generation=GENERATION_SECTION
+    )
     llm = FakeLLM(text="线索超过 7 天无跟进会被自动回收。")
 
     summary = run_job(make_generating_runner(retriever, llm))
@@ -351,7 +368,9 @@ def test_generate_writes_answer_and_metadata(patched):
 
 def test_empty_answer_is_never_persisted(patched):
     """红线: 空答案必须走重试路径, 绝不能写进 case_results。"""
-    fake_queue, retriever = patched(items=make_items(2), hits=["p1"], gold_ids={"p1"})
+    fake_queue, retriever = patched(
+        items=make_items(2), hits=["p1"], gold_ids={"p1"}, generation=GENERATION_SECTION
+    )
     llm = FakeLLM(text="   ")
 
     summary = run_job(make_generating_runner(retriever, llm))
@@ -364,7 +383,9 @@ def test_empty_answer_is_never_persisted(patched):
 
 
 def test_transient_generation_error_keeps_item_retryable(patched):
-    fake_queue, retriever = patched(items=make_items(1), hits=["p1"], gold_ids={"p1"})
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"}, generation=GENERATION_SECTION
+    )
     llm = FakeLLM(error=LLMTransientError("HTTP 429: rate limited"))
 
     run_job(make_generating_runner(retriever, llm))
@@ -376,7 +397,9 @@ def test_transient_generation_error_keeps_item_retryable(patched):
 
 def test_fatal_generation_error_aborts_job_instead_of_flooding_dead_letters(patched):
     """红线: 欠费/鉴权这类致命错误要立刻中止任务, 不能刷 N 条死信把原因埋掉。"""
-    fake_queue, retriever = patched(items=make_items(4), hits=["p1"], gold_ids={"p1"})
+    fake_queue, retriever = patched(
+        items=make_items(4), hits=["p1"], gold_ids={"p1"}, generation=GENERATION_SECTION
+    )
     llm = FakeLLM(error=LLMFatalError("HTTP 402: account balance is insufficient"))
 
     summary = run_job(make_generating_runner(retriever, llm))
@@ -391,8 +414,11 @@ def test_fatal_generation_error_aborts_job_instead_of_flooding_dead_letters(patc
 
 
 def test_invalid_prompt_fails_job_before_touching_retrieval(patched):
-    """prompt 资产非法属于配置错误: 应在任何检索/索引 IO 之前就让任务失败。"""
-    fake_queue, retriever = patched(items=make_items(2), hits=["p1"], gold_ids={"p1"})
+    """快照里引用的 prompt 资产不存在属于配置错误: 应在任何检索/索引 IO 之前就让任务失败。"""
+    section = dict(GENERATION_SECTION, prompt_id="不存在的prompt")
+    fake_queue, retriever = patched(
+        items=make_items(2), hits=["p1"], gold_ids={"p1"}, generation=section
+    )
     factory_calls: list[str] = []
 
     def factory(settings: Settings, collection: str, top_k: int) -> FakeRetriever:
@@ -401,9 +427,9 @@ def test_invalid_prompt_fails_job_before_touching_retrieval(patched):
 
     runner = QueueRunner(
         Settings(_env_file=None),
-        RunnerOptions(generate=True, prompt_id="不存在的prompt"),
+        RunnerOptions(),
         retriever_factory=factory,
-        llm_client=FakeLLM(),
+        llm_client=FakeLLM(),   # 注入 client, 但 prompt 仍从快照的 prompt_id 加载
     )
 
     summary = run_job(runner)
@@ -416,7 +442,9 @@ def test_invalid_prompt_fails_job_before_touching_retrieval(patched):
 
 def test_generation_usage_is_merged_into_run_metrics(patched, monkeypatch: pytest.MonkeyPatch):
     """成本必须能从 run.metrics 读到(D8): 否则 M4 之后的账单无从核算。"""
-    fake_queue, retriever = patched(items=make_items(1), hits=["p1"], gold_ids={"p1"})
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"}, generation=GENERATION_SECTION
+    )
     monkeypatch.setattr(
         qr, "get_generation_usage",
         lambda dsn, run_id: {"answers_generated": 1, "prompt_tokens": 280, "completion_tokens": 22},
@@ -428,3 +456,35 @@ def test_generation_usage_is_merged_into_run_metrics(patched, monkeypatch: pytes
     assert metrics["answers_generated"] == 1
     assert metrics["prompt_tokens"] == 280 and metrics["completion_tokens"] == 22
     assert metrics["recall_at_k"] == 0.5, "检索侧指标不受生成影响"
+
+
+def test_generation_uses_snapshot_parameters_not_worker_env(patched):
+    """红线(D14): 生成参数以**快照**为准, 不看 worker 环境变量 —— 否则报告写的与实际调的不一致。"""
+    section = dict(GENERATION_SECTION, model="snapshot-model", provider="snapshot-provider",
+                   temperature=0.3, max_tokens=128, max_context_chars=500)
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"}, generation=section
+    )
+    llm = FakeLLM()
+
+    run_job(make_generating_runner(retriever, llm))
+
+    meta = fake_queue.completed[0]["generation"]
+    assert meta["model"] == "fake-deepseek", "model 用客户端实际返回的模型名"
+    assert meta["provider"] == "snapshot-provider"
+    assert meta["temperature"] == 0.3, "温度必须来自快照"
+    assert meta["max_tokens"] == 128
+    assert meta["context_chars"] <= 500, "上下文预算来自快照(而不是 worker 的 GENERATION_MAX_CONTEXT_CHARS)"
+
+
+def test_blank_generation_prompt_in_snapshot_fails_fast(patched):
+    section = dict(GENERATION_SECTION, prompt_id="")
+    fake_queue, retriever = patched(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"}, generation=section
+    )
+
+    summary = run_job(make_generating_runner(retriever, FakeLLM()))
+
+    assert summary.status == "failed"
+    assert "生成配置错误" in fake_queue.finished[0][1]
+    assert fake_queue.completed == []

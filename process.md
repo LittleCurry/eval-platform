@@ -278,6 +278,18 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 
 ---
 
+### D14 生成评测的配置必须进快照，且"只在启用时写入"
+
+**决策**：M4 起 `config_snapshot` 增加 `generation` 段（`provider/base_url/model/prompt_id/temperature/max_tokens/max_context_chars`），但**仅当该 run 启用了生成评测时才写入**；`POST /api/v1/runs` 带 `generation` 对象 = 启用，不带 = 只跑检索（历史行为）。worker **是否生成、用什么参数，一律以快照为准**，`--generate` 这类 CLI 开关已移除。
+
+- **为什么"只在启用时写入"**：无条件加字段会让**全部历史 run 的 `config_hash` 作废**——M2/M3 的 run #3/#22/#32/#99/#100 那条"同一 `config_hash` 跨代码版本指标逐位一致"的证据、以及 `compare_runs` 的"是否同一配置"判定都会断掉。改为条件写入后，两边都成立：只跑检索的指纹**字节级不变**（红线由 `snapshot_test.go` 的 `wantConfigHash` + `test_snapshot.py` 的 `WANT_CONFIG_HASH_BASELINE` 双向锁定），而"启用生成"是一枚**可区分的新指纹**（这本身就是另一场实验，理应不同）。
+- **为什么快照是唯一权威**：如果参数来自 worker 的环境变量，报告里记录的模型/prompt 就可能与实际调用不一致——"可复现"变成空话。实测教训：S4 阶段用 CLI 开关临时跑的两个 run（#139/#140）与 run #100 的 `config_hash` **完全相同**（`4e767020`），却是两种不同的实验；这正是本决策要消除的歧义。
+- **跨语言指纹的浮点约定**：`temperature` 是首个进快照的浮点数，而 Go 把 `0.0` 编成 `0`、Python 的 `json` 编成 `0.0` —— 同配置会算出不同指纹。约定为**整数化浮点写成整数**（两侧各有 `normalizeFloat` / `normalize_float`），并用两组常量锁定（`temperature=0` 与 `temperature=0.3`，后者证明不是"只对了整数"的巧合）。
+- **服务端与 worker 的分工**：服务端只校验**形状**（范围、必填、正数），`GENERATION_*` 环境变量在两侧都作为"提交时未提供字段的默认值"；prompt 文件是否存在由 worker 在**开始跑题之前**校验并让任务快速失败（`GenerationSectionError` / `PromptError` → job failed，不刷死信）。
+- **生成元信息落在哪**：`case_results.answer` + `case_results.generation`（与检索结果**同一事务**写，继承 checkpoint 幂等），其中 `prompt_hash` 是 prompt **内容**指纹（服务端拿不到文件内容，故快照里只有 `prompt_id`，内容哈希由 worker 记录）——这也是 M4-2 judge 缓存键（D5/D8）的前半截。
+
+---
+
 ## 5. 评测集建设指南（中文自建语料）
 
 > 这是全项目最容易卡、也最不能省的环节。**先小后大**：首个领域 20–50 篇源文档 + 30–100 题即可让 M2 出可信指标，之后迭代扩量。

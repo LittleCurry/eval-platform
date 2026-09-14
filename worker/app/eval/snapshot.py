@@ -43,6 +43,17 @@ def git_sha(repo_root: str | Path | None = None) -> str:
     return completed.stdout.strip() or "unknown"
 
 
+def normalize_float(value: float) -> int | float:
+    """整数化浮点: 0.0 -> 0。
+
+    跨语言指纹的第一个浮点陷阱: Go 的 encoding/json 把 0.0 编成 `0`, Python 的 json 编成 `0.0`,
+    同一份配置在两侧会算出不同的 config_hash。统一"整数化的浮点写成整数",
+    非整数(如 0.3)两侧的短表示一致("0.3"), 于是指纹可对齐。
+    """
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
 def build_config_snapshot(
         *,
         settings: Any,
@@ -52,9 +63,14 @@ def build_config_snapshot(
         top_k: int,
         reranker_enabled: bool = False,
         extras: dict[str, Any] | None = None,
+        generation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """构建"这次 run 用了什么配置"的全量快照。"""
-    return {
+    """构建"这次 run 用了什么配置"的全量快照。
+
+    `generation` 为 None 时**不写该键**: 这样"只跑检索"的历史 run(M2/M3)指纹保持不变,
+    而"开启生成"会成为一枚可区分的新指纹 —— 见 process.md D14。
+    """
+    snapshot: dict[str, Any] = {
         "chunking": {
             "strategy": cfg.strategy,
             "chunk_size": cfg.chunk_size,
@@ -71,6 +87,22 @@ def build_config_snapshot(
         "retrieval": {"top_k": top_k, "reranker": {"enabled": reranker_enabled}},
         "data": {"corpus_id": corpus_id, "dataset_id": dataset_id},
         "extras": extras or {},
+    }
+    if generation is not None:
+        snapshot["generation"] = build_generation_section(generation)
+    return snapshot
+
+
+def build_generation_section(generation: dict[str, Any]) -> dict[str, Any]:
+    """规范化生成段(字段名/类型必须与 Go 侧 eval.GenerationConfig 一一对应)。"""
+    return {
+        "provider": str(generation["provider"]),
+        "base_url": str(generation["base_url"]),
+        "model": str(generation["model"]),
+        "prompt_id": str(generation["prompt_id"]),
+        "temperature": normalize_float(generation.get("temperature", 0.0)),
+        "max_tokens": int(generation.get("max_tokens", 512)),
+        "max_context_chars": int(generation.get("max_context_chars", 3000)),
     }
 
 

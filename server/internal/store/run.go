@@ -36,6 +36,9 @@ type RunCaseResult struct {
 	Metrics    map[string]any `json:"metrics"`
 	Flags      []string       `json:"flags"`
 	LatencyMS  *int           `json:"latency_ms,omitempty"`
+	// M4: 生成侧结果。只跑检索的 run 里 Answer 为空串、Generation 为 {} -> 响应里省略。
+	Answer     string         `json:"answer,omitempty"`
+	Generation map[string]any `json:"generation,omitempty"`
 }
 
 const runColumns = `id, project_id, dataset_id, corpus_id, status, config_hash, git_sha,
@@ -105,7 +108,8 @@ func (p *Postgres) ListRunCaseResults(
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT cr.case_id, c.qid, c.question,
 		       COALESCE(c.difficulty, ''), COALESCE(c.category, ''),
-		       cr.retrieved::text, cr.metrics::text, cr.flags::text, cr.latency_ms
+		       cr.retrieved::text, cr.metrics::text, cr.flags::text, cr.latency_ms,
+		       COALESCE(cr.answer, ''), COALESCE(cr.generation::text, '{}')
 		FROM case_results cr
 		JOIN cases c ON c.id = cr.case_id
 		WHERE cr.run_id = $1
@@ -120,16 +124,17 @@ func (p *Postgres) ListRunCaseResults(
 	out := make([]RunCaseResult, 0)
 	for rows.Next() {
 		var item RunCaseResult
-		var retrieved, metrics, flags string
+		var retrieved, metrics, flags, generation string
 		var latency sql.NullInt64
 
 		if err := rows.Scan(&item.CaseID, &item.QID, &item.Question, &item.Difficulty,
-			&item.Category, &retrieved, &metrics, &flags, &latency); err != nil {
+			&item.Category, &retrieved, &metrics, &flags, &latency, &item.Answer, &generation); err != nil {
 			return nil, err
 		}
 		item.Retrieved = parseJSONList(retrieved)
 		item.Metrics = parseJSONMap(metrics)
 		item.Flags = parseJSONStrings(flags)
+		item.Generation = parseJSONMap(generation)
 		if latency.Valid {
 			value := int(latency.Int64)
 			item.LatencyMS = &value

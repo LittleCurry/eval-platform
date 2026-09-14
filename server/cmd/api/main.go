@@ -42,6 +42,15 @@ func main() {
 			Dim:       cfg.EmbeddingDim,
 			BatchSize: cfg.EmbeddingBatchSize,
 		},
+		EvalGeneration: eval.GenerationConfig{
+			Provider:        cfg.GenerationProvider,
+			BaseURL:         cfg.GenerationBaseURL,
+			Model:           cfg.GenerationModel,
+			PromptID:        cfg.GenerationPromptID,
+			Temperature:     cfg.GenerationTemperature,
+			MaxTokens:       cfg.GenerationMaxTokens,
+			MaxContextChars: cfg.GenerationMaxContextChars,
+		},
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}

@@ -22,6 +22,15 @@ type Config struct {
 	EmbeddingModel     string
 	EmbeddingDim       int
 	EmbeddingBatchSize int
+
+	// 生成侧默认值(M4): 提交 run 时未显式给出的字段会取这里, 并写进配置快照(D7/D14)
+	GenerationProvider        string
+	GenerationBaseURL         string
+	GenerationModel           string
+	GenerationPromptID        string
+	GenerationTemperature     float64
+	GenerationMaxTokens       int
+	GenerationMaxContextChars int
 }
 
 // Load 从环境变量加载配置, 缺省时用默认值(与 compose.yaml 默认一致)。
@@ -39,6 +48,14 @@ func Load() Config {
 		EmbeddingModel:     getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
 		EmbeddingDim:       getenvInt("EMBEDDING_DIM", 1024),
 		EmbeddingBatchSize: getenvInt("EMBEDDING_BATCH_SIZE", 16),
+
+		GenerationProvider:        getenv("GENERATION_PROVIDER", "siliconflow"),
+		GenerationBaseURL:         getenv("GENERATION_BASE_URL", "https://api.siliconflow.cn/v1"),
+		GenerationModel:           getenv("GENERATION_MODEL", "deepseek-ai/DeepSeek-V3.2"),
+		GenerationPromptID:        getenv("GENERATION_PROMPT_ID", "qa_zh_v1"),
+		GenerationTemperature:     getenvFloat("GENERATION_TEMPERATURE", 0),
+		GenerationMaxTokens:       getenvInt("GENERATION_MAX_TOKENS", 512),
+		GenerationMaxContextChars: getenvInt("GENERATION_MAX_CONTEXT_CHARS", 3000),
 	}
 }
 
@@ -53,6 +70,18 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getenvFloat(key string, def float64) float64 {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return def
+	}
+	return value
 }
 
 func getenvInt(key string, def int) int {

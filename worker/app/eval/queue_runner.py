@@ -69,9 +69,13 @@ class RunnerOptions:
     reclaim_every_polls: int = 10
     batch_pause_ms: float = 0.0  # 批次间暂停(故障演练/模拟慢 LLM 用)
     # ---- M4: 生成链路 ----
-    generate: bool = False            # 是否在检索之后调用生成模型产出 answer
-    prompt_id: str = "qa_zh_v1"       # prompts/<id>.md
+    # 注意: "是否生成"**不由这里决定**, 而是看 run 的配置快照里有没有 generation 段(D14) ——
+    # 这样"跑过的实验"与"记录的配置"永远一致, 不会出现"快照写着只跑检索、实际却调了模型"。
     generation_concurrency: int = 4   # 同批次内并行生成数(实测单题稳态 ~2.4s, 4 并发足够且不易触发限流)
+
+
+class GenerationSectionError(RuntimeError):
+    """配置快照里的 generation 段缺失/类型不对 —— 属于提交侧的问题, 直接失败并说明原因。"""
 
 
 class GenerationAborted(RuntimeError):
@@ -188,18 +192,19 @@ class QueueRunner:
         chunk_hash = chunking_hash(chunking_cfg)
         collection = collection_name(ctx.corpus_id, chunk_hash)
 
-        # 生成依赖在**任务开始前**就准备好: prompt 非法或 key 缺失属于配置错误,
+        # 生成依赖在**任务开始前**就准备好: 快照不合法、prompt 缺失、key 缺失都属于配置错误,
         # 应当立刻以 failed 结束任务, 而不是跑到第 37 道题才炸出 60 条死信。
         owned_client: ChatClient | None = None
         generation: _GenerationContext | None = None
-        if self.options.generate:
-            try:
-                generation, owned_client = self._build_generation()
-            except (PromptError, LLMFatalError) as exc:
-                message = f"生成配置错误: {exc}"
-                finish_job(self.dsn, job.id, "failed", message)
-                self.log.error("generation_config_invalid", job_id=job.id, error=str(exc))
-                return JobSummary(job.id, job.run_id, "failed", 0, 0, 0, _ms(started))
+        try:
+            generation, owned_client = self._generation_from_snapshot(snapshot)
+        except (PromptError, LLMFatalError, GenerationSectionError) as exc:
+            message = f"生成配置错误: {exc}"
+            finish_job(self.dsn, job.id, "failed", message)
+            self.log.error("generation_config_invalid", job_id=job.id, error=str(exc))
+            return JobSummary(job.id, job.run_id, "failed", 0, 0, 0, _ms(started))
+        if generation is None:
+            self.log.info("job_mode_retrieval_only", job_id=job.id, run_id=job.run_id)
 
         doc_chunks = {
             row.doc_id: chunk_document(row.raw_text, chunking_cfg)
@@ -302,31 +307,49 @@ class QueueRunner:
             if owned_client is not None:
                 owned_client.close()
 
-    def _build_generation(self) -> tuple[_GenerationContext, ChatClient | None]:
-        """组装生成依赖(prompt + 客户端); 校验失败直接抛错, 由 execute_job 转成任务失败。
+    def _generation_from_snapshot(
+            self, snapshot: dict[str, Any],
+    ) -> tuple[_GenerationContext | None, ChatClient | None]:
+        """按配置快照决定本次任务是"检索 only"还是"检索 + 生成"(D14)。
+
+        快照里没有 generation 段 -> 只跑检索(历史 M2/M3 run 的语义);
+        有 generation 段 -> 一律按**快照里记录的参数**执行, 不看 worker 的环境变量:
+        否则报告里写的模型/prompt 与实际调用可能不一致, "可复现"就成了空话。
 
         返回值第二个元素是"本任务自己创建的客户端"(需要关闭); 注入的客户端不归本任务管。
         """
-        prompt = self._injected_prompt or load_prompt(self.options.prompt_id)
+        section = snapshot.get("generation")
+        if section is None:
+            return None, None
+        if not isinstance(section, dict):
+            raise GenerationSectionError(f"快照 generation 段类型不符: {type(section).__name__}")
+
+        prompt_id = str(section.get("prompt_id") or "").strip()
+        model = str(section.get("model") or "").strip()
+        if not prompt_id or not model:
+            raise GenerationSectionError(f"快照 generation 段缺少 prompt_id/model: {section}")
+
+        prompt = self._injected_prompt or load_prompt(prompt_id)
         client = self._injected_llm_client
         owned: ChatClient | None = None
         if client is None:
             owned = ChatClient(
-                base_url=self.settings.generation_base_url,
+                base_url=str(section.get("base_url") or self.settings.generation_base_url),
                 api_key=self.settings.resolved_generation_api_key,
-                model=self.settings.generation_model,
+                model=model,
                 timeout=self.settings.generation_timeout_seconds,
                 max_retries=self.settings.generation_max_retries,
             )
             client = owned
+
         context = _GenerationContext(
             client=client,
             prompt=prompt,
-            provider=self.settings.generation_provider,
-            base_url=self.settings.generation_base_url,
-            max_context_chars=self.settings.generation_max_context_chars,
-            temperature=self.settings.generation_temperature,
-            max_tokens=self.settings.generation_max_tokens,
+            provider=str(section.get("provider") or ""),
+            base_url=str(section.get("base_url") or ""),
+            max_context_chars=int(section.get("max_context_chars") or 3000),
+            temperature=float(section.get("temperature") or 0.0),
+            max_tokens=int(section.get("max_tokens") or 512),
             concurrency=max(1, self.options.generation_concurrency),
         )
         return context, owned

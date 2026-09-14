@@ -17,7 +17,8 @@ type Deps struct {
 	Datasets      DatasetStore
 	Cases         CaseStore
 	Runs          RunStore
-	EvalEmbedding eval.EmbeddingConfig
+	EvalEmbedding  eval.EmbeddingConfig
+	EvalGeneration eval.GenerationConfig
 }
 
 // NewRouter 组装全部路由。
@@ -36,7 +37,7 @@ func NewRouter(d Deps) *gin.Engine {
 	documents := newDocumentHandler(d.Documents)
 	datasets := newDatasetHandler(d.Datasets)
 	cases := newCaseHandler(d.Cases)
-	runs := newRunHandler(d.Runs, d.EvalEmbedding)
+	runs := newRunHandler(d.Runs, d.EvalEmbedding, d.EvalGeneration)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)

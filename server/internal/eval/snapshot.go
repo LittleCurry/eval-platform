@@ -70,6 +70,80 @@ func DefaultEmbedding() EmbeddingConfig {
 	}
 }
 
+// GenerationConfig 生成侧配置(M4/D14; 与 worker 侧 build_generation_section 对齐)。
+//
+// 只有"启用了生成评测"的 run 才会把它写进快照 —— 见 D14:
+// 为 nil 时不写 generation 键, 这样只跑检索的历史 run(M2/M3)指纹保持不变。
+type GenerationConfig struct {
+	Provider        string  `json:"provider"`
+	BaseURL         string  `json:"base_url"`
+	Model           string  `json:"model"`
+	PromptID        string  `json:"prompt_id"`
+	Temperature     float64 `json:"temperature"`
+	MaxTokens       int     `json:"max_tokens"`
+	MaxContextChars int     `json:"max_context_chars"`
+}
+
+// DefaultGeneration 与 worker 侧 GENERATION_* 默认值一致(SiliconFlow 提供的 DeepSeek, 复用同一个 key)。
+func DefaultGeneration() GenerationConfig {
+	return GenerationConfig{
+		Provider:        "siliconflow",
+		BaseURL:         "https://api.siliconflow.cn/v1",
+		Model:           "deepseek-ai/DeepSeek-V3.2",
+		PromptID:        "qa_zh_v1",
+		Temperature:     0,
+		MaxTokens:       512,
+		MaxContextChars: 3000,
+	}
+}
+
+// Validate 校验生成参数(在提交时就挡住明显非法的配置, 避免任务跑到一半才炸)。
+func (g GenerationConfig) Validate() error {
+	if strings.TrimSpace(g.Provider) == "" {
+		return fmt.Errorf("generation.provider 必填")
+	}
+	if strings.TrimSpace(g.Model) == "" {
+		return fmt.Errorf("generation.model 必填")
+	}
+	if strings.TrimSpace(g.PromptID) == "" {
+		return fmt.Errorf("generation.prompt_id 必填(对应 worker/prompts/<id>.md)")
+	}
+	if g.Temperature < 0 || g.Temperature > 2 {
+		return fmt.Errorf("generation.temperature 应在 0~2 之间")
+	}
+	if g.MaxTokens <= 0 {
+		return fmt.Errorf("generation.max_tokens 必须为正整数")
+	}
+	if g.MaxContextChars <= 0 {
+		return fmt.Errorf("generation.max_context_chars 必须为正整数")
+	}
+	return nil
+}
+
+// normalizeFloat 把整数值的浮点转成 int, 使 JSON 输出为 `0` 而不是 `0.0`。
+//
+// 跨语言指纹的第一个浮点陷阱: Go 编出 `0`, Python 的 json 编出 `0.0` -> 同配置不同指纹。
+// worker 侧有对应的 normalize_float(见 app/eval/snapshot.py), 两侧必须同时改。
+func normalizeFloat(value float64) any {
+	if value == float64(int64(value)) {
+		return int64(value)
+	}
+	return value
+}
+
+// generationSection 生成快照里的 generation 段(字段与顺序无关, 因为指纹按键排序)。
+func generationSection(g GenerationConfig) map[string]any {
+	return map[string]any{
+		"provider":          g.Provider,
+		"base_url":          g.BaseURL,
+		"model":             g.Model,
+		"prompt_id":         g.PromptID,
+		"temperature":       normalizeFloat(g.Temperature),
+		"max_tokens":        g.MaxTokens,
+		"max_context_chars": g.MaxContextChars,
+	}
+}
+
 // SnapshotInput 构建配置快照的输入。
 type SnapshotInput struct {
 	Chunking  ChunkingConfig
@@ -79,6 +153,8 @@ type SnapshotInput struct {
 	TopK      int
 	Reranker  bool
 	Extras    map[string]any
+	// Generation 为 nil 表示"只跑检索"(不写 generation 键, 见 D14)。
+	Generation *GenerationConfig
 }
 
 // BuildSnapshot 生成全量配置快照(结构必须与 worker 侧一致)。
@@ -87,7 +163,7 @@ func BuildSnapshot(in SnapshotInput) map[string]any {
 	if extras == nil {
 		extras = map[string]any{}
 	}
-	return map[string]any{
+	snapshot := map[string]any{
 		"chunking": map[string]any{
 			"strategy":   in.Chunking.Strategy,
 			"chunk_size": in.Chunking.ChunkSize,
@@ -111,6 +187,10 @@ func BuildSnapshot(in SnapshotInput) map[string]any {
 		},
 		"extras": extras,
 	}
+	if in.Generation != nil {
+		snapshot["generation"] = generationSection(*in.Generation)
+	}
+	return snapshot
 }
 
 // SnapshotHash 配置指纹: 键排序 + 紧凑 JSON + sha256 (与 worker 同算法)。

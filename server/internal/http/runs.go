@@ -15,15 +15,19 @@ import (
 )
 
 type runHandler struct {
-	store     RunStore
-	embedding eval.EmbeddingConfig
+	store      RunStore
+	embedding  eval.EmbeddingConfig
+	generation eval.GenerationConfig
 }
 
-func newRunHandler(s RunStore, embedding eval.EmbeddingConfig) *runHandler {
+func newRunHandler(s RunStore, embedding eval.EmbeddingConfig, generation eval.GenerationConfig) *runHandler {
 	if embedding.Provider == "" {
 		embedding = eval.DefaultEmbedding()
 	}
-	return &runHandler{store: s, embedding: embedding}
+	if generation.Provider == "" {
+		generation = eval.DefaultGeneration()
+	}
+	return &runHandler{store: s, embedding: embedding, generation: generation}
 }
 
 // queryInt 读取整型查询参数; 缺失或非法时用默认值。
@@ -161,12 +165,61 @@ type submitRunChunking struct {
 	MinChars  int    `json:"min_chars"`
 }
 
+// submitRunGeneration 提交时的生成配置(M4)。
+//
+// 字段用**指针**: 只有这样才能区分"没传"(取服务端默认)与"显式传了 0"。
+// temperature 的 0 是有意义的取值(确定性采样), 用零值判断会把用户的显式 0 覆盖掉。
+// 对象存在 = 启用生成评测(D14: 此时才会往快照里写 generation 段)。
+type submitRunGeneration struct {
+	Provider        string   `json:"provider"`
+	BaseURL         string   `json:"base_url"`
+	Model           string   `json:"model"`
+	PromptID        string   `json:"prompt_id"`
+	Temperature     *float64 `json:"temperature"`
+	MaxTokens       *int     `json:"max_tokens"`
+	MaxContextChars *int     `json:"max_context_chars"`
+}
+
 type submitRunReq struct {
-	DatasetID int64              `json:"dataset_id"`
-	CorpusID  int64              `json:"corpus_id"`
-	ProjectID int64              `json:"project_id"`
-	TopK      int                `json:"top_k"`
-	Chunking  *submitRunChunking `json:"chunking"`
+	DatasetID  int64                `json:"dataset_id"`
+	CorpusID   int64                `json:"corpus_id"`
+	ProjectID  int64                `json:"project_id"`
+	TopK       int                  `json:"top_k"`
+	Chunking   *submitRunChunking   `json:"chunking"`
+	Generation *submitRunGeneration `json:"generation"`
+}
+
+// resolveGeneration 把请求里的生成配置与服务端默认值合并并校验; 未启用时返回 nil。
+func (h *runHandler) resolveGeneration(req *submitRunGeneration) (*eval.GenerationConfig, error) {
+	if req == nil {
+		return nil, nil
+	}
+	config := h.generation // 服务端默认(来自 GENERATION_* 环境变量)
+	if value := strings.TrimSpace(req.Provider); value != "" {
+		config.Provider = value
+	}
+	if value := strings.TrimSpace(req.BaseURL); value != "" {
+		config.BaseURL = value
+	}
+	if value := strings.TrimSpace(req.Model); value != "" {
+		config.Model = value
+	}
+	if value := strings.TrimSpace(req.PromptID); value != "" {
+		config.PromptID = value
+	}
+	if req.Temperature != nil {
+		config.Temperature = *req.Temperature
+	}
+	if req.MaxTokens != nil {
+		config.MaxTokens = *req.MaxTokens
+	}
+	if req.MaxContextChars != nil {
+		config.MaxContextChars = *req.MaxContextChars
+	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	return &config, nil
 }
 
 // Submit POST /runs
@@ -208,6 +261,13 @@ func (h *runHandler) Submit(c *gin.Context) {
 		return
 	}
 
+	// 生成配置: 未传 generation 对象 = 只跑检索(D14: 此时快照不含 generation 段)
+	generation, err := h.resolveGeneration(req.Generation)
+	if err != nil {
+		writeErr(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	ctx := c.Request.Context()
 	projectID := req.ProjectID
 	if projectID <= 0 {
@@ -225,11 +285,12 @@ func (h *runHandler) Submit(c *gin.Context) {
 	}
 
 	snapshot := eval.BuildSnapshot(eval.SnapshotInput{
-		Chunking:  chunking,
-		Embedding: h.embedding,
-		CorpusID:  req.CorpusID,
-		DatasetID: req.DatasetID,
-		TopK:      req.TopK,
+		Chunking:   chunking,
+		Embedding:  h.embedding,
+		CorpusID:   req.CorpusID,
+		DatasetID:  req.DatasetID,
+		TopK:       req.TopK,
+		Generation: generation,
 	})
 	configHash, err := eval.SnapshotHash(snapshot)
 	if err != nil {
@@ -266,13 +327,14 @@ func (h *runHandler) Submit(c *gin.Context) {
 	}
 
 	writeJSON(c, http.StatusCreated, gin.H{
-		"run_id":        ref.RunID,
-		"job_id":        ref.JobID,
-		"items":         ref.Items,
-		"status":        "pending",
-		"top_k":         req.TopK,
-		"config_hash":   configHash,
-		"chunking_hash": chunkingHash,
+		"run_id":             ref.RunID,
+		"job_id":             ref.JobID,
+		"items":              ref.Items,
+		"status":             "pending",
+		"top_k":              req.TopK,
+		"config_hash":        configHash,
+		"chunking_hash":      chunkingHash,
+		"generation_enabled": generation != nil,
 		"collection":    eval.CollectionName(req.CorpusID, chunkingHash),
 	})
 }
