@@ -36,6 +36,21 @@ import {
   statusLabel,
   statusTagType,
 } from '../utils/format'
+import {
+  answerSnippet,
+  attributionText,
+  claimLabel,
+  claimSummary,
+  claimTagType,
+  flagLabel,
+  flagTagType,
+  generationSummary,
+  hasLlmMetrics,
+  missingCaseNotice,
+  primaryFlag,
+  ratesConsistent,
+  rubricSummary,
+} from '../utils/report'
 
 const route = useRoute()
 const message = useMessage()
@@ -47,6 +62,7 @@ const caseResults = ref<RunCaseResult[]>([])
 const loading = ref(false)
 const errorText = ref('')
 const flaggedOnly = ref(false)
+const flagFilter = ref<string | null>(null)
 const detail = ref<RunCaseResult | null>(null)
 const showDetail = ref(false)
 const autoRefresh = ref(true)
@@ -112,6 +128,51 @@ function openDetail(row: RunCaseResult) {
   showDetail.value = true
 }
 
+/** 点标签统计即按该标签筛选(数据已在本地 200 条内, 不必再打接口)。 */
+function toggleFlagFilter(flag: string) {
+  flagFilter.value = flagFilter.value === flag ? null : flag
+}
+
+const filteredCases = computed(() => {
+  const flag = flagFilter.value
+  if (!flag) return caseResults.value
+  return caseResults.value.filter((row) => (row.flags ?? []).includes(flag))
+})
+
+const detailClaims = computed(() => detail.value?.judge?.claims ?? [])
+const detailPrimaryFlag = computed(() => primaryFlag(detail.value?.flags))
+const detailGeneration = computed(() => generationSummary(detail.value?.generation))
+
+// ---- 生成侧 / 判定侧指标(M4-4) ----
+
+const llmCardVisible = computed(() => hasLlmMetrics(report.value?.metrics))
+
+const llmStats = computed<{ label: string; value: string }[]>(() => {
+  const m = report.value?.metrics
+  if (!m) return []
+  return [
+    { label: '答案生成数', value: String(m.answers_generated ?? 0) },
+    { label: '断言支持率', value: formatPercent(m.claim_support_rate) },
+    { label: '幻觉率', value: formatPercent(m.hallucination_rate) },
+    { label: '无关断言率', value: formatPercent(m.irrelevant_rate) },
+    { label: '断言总数', value: String(m.claims_total ?? 0) },
+    { label: '平均断言/答案', value: formatScore(m.avg_claims_per_answer, 2) },
+    { label: 'relevance 均值', value: formatScore(m.relevance_avg, 2) },
+    { label: 'helpfulness 均值', value: formatScore(m.helpfulness_avg, 2) },
+    { label: '判定题数', value: String(m.cases_judged ?? 0) },
+    { label: 'judge token', value: String((m.judge_prompt_tokens ?? 0) + (m.judge_completion_tokens ?? 0)) },
+    { label: '缓存命中', value: String(m.judge_cache_hits ?? 0) },
+    { label: '生成 token', value: String((m.prompt_tokens ?? 0) + (m.completion_tokens ?? 0)) },
+  ]
+})
+
+/** 三率之和必须为 1; 不成立说明口径出了问题, 界面必须自己喊出来。 */
+const ratesInconsistent = computed(() => ratesConsistent(report.value?.metrics) === false)
+
+const attributionLine = computed(() => attributionText(report.value?.metrics))
+
+const missingNotice = computed(() => missingCaseNotice(progressInfo.value?.job?.progress.failed))
+
 // ---- 配置快照展示(把 jsonb 拆成可读文本) ----
 
 function snapshotSection(key: string): Record<string, unknown> {
@@ -156,6 +217,34 @@ const progressLabel = computed(() => {
   return parts.join(' · ')
 })
 
+// ---- 表格列 ----
+
+/** 主因标签(flags[0]): 报告的第一眼应该是"这题的锅在谁头上"。 */
+function primaryFlagCell(row: RunCaseResult) {
+  const flag = primaryFlag(row.flags)
+  if (!flag) return h(NText, { depth: 3 }, { default: () => '—' })
+  return h('span', { title: (row.flags ?? []).join(' → ') },
+      [h(NTag, { size: 'small', type: flagTagType(flag) }, { default: () => flagLabel(flag) })])
+}
+
+function claimsCell(row: RunCaseResult) {
+  const summary = claimSummary(row.judge)
+  return summary === null ? h(NText, { depth: 3 }, { default: () => '—' }) : summary
+}
+
+function rubricCell(row: RunCaseResult) {
+  const summary = rubricSummary(row.judge)
+  if (summary === null) return h(NText, { depth: 3 }, { default: () => '—' })
+  const reason = row.judge?.rubric?.reason ?? ''
+  return h('span', { title: reason }, [summary])
+}
+
+function answerCell(row: RunCaseResult) {
+  const snippet = answerSnippet(row.answer)
+  if (snippet === null) return h(NText, { depth: 3 }, { default: () => '—' })
+  return h('span', { title: row.answer ?? '' }, [snippet])
+}
+
 const worstColumns: DataTableColumns<RunCaseResult> = [
   { title: 'qid', key: 'qid', width: 110 },
   { title: '问题', key: 'question', ellipsis: { tooltip: true } },
@@ -175,12 +264,13 @@ const worstColumns: DataTableColumns<RunCaseResult> = [
     width: 120,
     render: (row) => (row.metrics?.first_hit_rank ? `第 ${row.metrics.first_hit_rank} 位` : '未命中'),
   },
+  { title: '主因', key: 'primary_flag', width: 150, render: (row) => primaryFlagCell(row) },
   {
     title: '操作',
     key: 'actions',
     width: 110,
     render: (row) =>
-        h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => '检索明细' }),
+        h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => 'case 详情' }),
   },
 ]
 
@@ -209,15 +299,19 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
     width: 80,
     render: (row) => formatScore(row.metrics?.reciprocal_rank),
   },
+  { title: '主因', key: 'primary_flag', width: 150, render: (row) => primaryFlagCell(row) },
+  { title: '断言', key: 'claims', width: 170, render: (row) => claimsCell(row) },
+  { title: 'rubric', key: 'rubric', width: 80, render: (row) => rubricCell(row) },
+  { title: '答案', key: 'answer', width: 220, render: (row) => answerCell(row) },
   {
-    title: '标签',
+    title: '全部标签',
     key: 'flags',
     width: 140,
     render: (row) =>
         row.flags && row.flags.length
             ? h(NSpace, { size: 4 }, {
               default: () => row.flags.map((flag) =>
-                  h(NTag, { size: 'small', type: 'warning' }, { default: () => flag }),
+                  h(NTag, { size: 'small', type: flagTagType(flag) }, { default: () => flagLabel(flag) }),
               ),
             })
             : h(NText, { depth: 3 }, { default: () => '—' }),
@@ -227,7 +321,7 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
     key: 'actions',
     width: 110,
     render: (row) =>
-        h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => '检索明细' }),
+        h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => 'case 详情' }),
   },
 ]
 </script>
@@ -261,6 +355,10 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
           最近心跳: {{ formatDateTime(progressInfo?.job?.heartbeat_at) }}
         </NText>
       </NSpace>
+
+      <NAlert v-if="missingNotice" type="warning" :show-icon="false" style="margin-top: 10px">
+        {{ missingNotice }}
+      </NAlert>
     </NCard>
 
     <NCard :title="report ? `运行报告 · run #${report.run.id}` : '运行报告'" style="margin-bottom: 16px">
@@ -296,6 +394,22 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
       </NGrid>
     </NCard>
 
+    <NCard v-if="llmCardVisible" title="生成与判定（M4 生成侧评测）" style="margin-bottom: 16px">
+      <NAlert v-if="ratesInconsistent" type="error" :show-icon="false" style="margin-bottom: 12px">
+        三率之和不为 1（支持率 + 幻觉率 + 无关率）—— 口径本身出了问题，先别拿这份报告下结论。
+      </NAlert>
+
+      <NGrid :cols="6" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+        <NGi v-for="stat in llmStats" :key="stat.label" span="6 s:3 m:2">
+          <NStatistic :label="stat.label" :value="stat.value" />
+        </NGi>
+      </NGrid>
+
+      <NText v-if="attributionLine" depth="3" style="display: block; margin-top: 12px; font-size: 12px">
+        {{ attributionLine }}
+      </NText>
+    </NCard>
+
     <NCard v-if="report" title="实验配置（可复现四件套）" style="margin-bottom: 16px">
       <NDescriptions :column="2" label-placement="left" bordered size="small">
         <NDescriptionsItem label="数据集 ID">{{ report.run.dataset_id }}</NDescriptionsItem>
@@ -312,14 +426,26 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
         </NDescriptionsItem>
       </NDescriptions>
 
-      <NSpace v-if="flagEntries.length" style="margin-top: 12px">
-        <NText depth="3">归因标签统计：</NText>
-        <NTag v-for="[flag, count] in flagEntries" :key="flag" size="small" type="warning">
-          {{ flag }} × {{ count }}
+      <NSpace v-if="flagEntries.length" align="center" style="margin-top: 12px">
+        <NText depth="3">归因标签统计（点一下筛选）：</NText>
+        <NTag
+            v-for="[flag, count] in flagEntries"
+            :key="flag"
+            size="small"
+            :type="flagTagType(flag)"
+            :bordered="flagFilter !== flag"
+            style="cursor: pointer"
+            :title="flag"
+            @click="toggleFlagFilter(flag)"
+        >
+          {{ flagLabel(flag) }} × {{ count }}
         </NTag>
+        <NButton v-if="flagFilter" size="tiny" quaternary @click="toggleFlagFilter(flagFilter)">
+          清除筛选
+        </NButton>
       </NSpace>
       <NText v-else depth="3" style="display: block; margin-top: 12px">
-        暂无归因标签（retrieval_miss / hallucination 等在 M4 生成侧评测后写入）。
+        本次 run 没有任何归因标签（检索与判定都没发现环节缺陷）。
       </NText>
     </NCard>
 
@@ -335,23 +461,35 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
     <NCard title="全部单题结果">
       <template #header-extra>
         <NSpace align="center">
+          <NTag v-if="flagFilter" size="small" type="warning">筛选中：{{ flagLabel(flagFilter) }}</NTag>
           <NText depth="3">只看有标签的</NText>
           <NSwitch :value="flaggedOnly" @update:value="toggleFlagged" />
         </NSpace>
       </template>
       <NDataTable
           :columns="caseColumns"
-          :data="caseResults"
+          :data="filteredCases"
           :loading="loading"
           :row-key="(row: RunCaseResult) => row.case_id"
           size="small"
       />
     </NCard>
 
-    <NDrawer v-model:show="showDetail" :width="560">
-      <NDrawerContent :title="detail ? `检索明细 · ${detail.qid}` : '检索明细'">
+    <NDrawer v-model:show="showDetail" :width="620">
+      <NDrawerContent :title="detail ? `case 详情 · ${detail.qid}` : 'case 详情'">
         <template v-if="detail">
+          <NSpace align="center" style="margin-bottom: 8px">
+            <NTag v-if="detailPrimaryFlag" size="small" :type="flagTagType(detailPrimaryFlag)">
+              主因：{{ flagLabel(detailPrimaryFlag) }}
+            </NTag>
+            <NText v-else depth="3">无归因标签</NText>
+            <NTag v-if="detail.flags && detail.flags.length > 1" size="small" :bordered="false">
+              还有 {{ detail.flags.length - 1 }} 个标签
+            </NTag>
+          </NSpace>
+
           <NText style="display: block; margin-bottom: 8px">{{ detail.question }}</NText>
+
           <NSpace size="small" style="margin-bottom: 12px">
             <NTag size="small">Recall {{ formatPercent(detail.metrics?.recall) }}</NTag>
             <NTag size="small">gold 数 {{ detail.metrics?.gold_count ?? '—' }}</NTag>
@@ -360,6 +498,52 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
               首个命中 {{ detail.metrics?.first_hit_rank ? `第 ${detail.metrics.first_hit_rank} 位` : '未命中' }}
             </NTag>
           </NSpace>
+
+          <NCard v-if="detail.answer" size="small" title="答案" style="margin-bottom: 12px">
+            <div class="answer-block">{{ detail.answer }}</div>
+            <NText v-if="detailGeneration" depth="3" style="display: block; margin-top: 6px; font-size: 12px">
+              {{ detailGeneration }}
+            </NText>
+          </NCard>
+
+          <NCard v-if="detailClaims.length" size="small" title="断言逐条核对" style="margin-bottom: 12px">
+            <NText depth="3" style="display: block; margin-bottom: 8px; font-size: 12px">
+              {{ claimSummary(detail.judge) }} —— 红行就是"资料里找不到依据"的句子（幻觉）。
+            </NText>
+            <NList bordered size="small">
+              <NListItem v-for="claim in detailClaims" :key="claim.id">
+                <div class="claim-row" :class="`claim-${claim.label}`">
+                  <NSpace align="center" :size="6" style="margin-bottom: 4px">
+                    <NTag size="tiny" :type="claimTagType(claim.label)">{{ claimLabel(claim.label) }}</NTag>
+                    <NText>{{ claim.text }}</NText>
+                  </NSpace>
+                  <NText v-if="claim.evidence" depth="3" style="display: block; font-size: 12px">
+                    依据：{{ claim.evidence }}
+                  </NText>
+                  <NText v-else depth="3" style="display: block; font-size: 12px">
+                    依据：无（检索到的资料里找不到支持这句话的内容）
+                  </NText>
+                  <NText v-if="claim.reason" depth="3" style="display: block; font-size: 12px">
+                    判定理由：{{ claim.reason }}
+                  </NText>
+                </div>
+              </NListItem>
+            </NList>
+          </NCard>
+
+          <NCard v-if="detail.judge?.rubric" size="small" title="rubric 打分" style="margin-bottom: 12px">
+            <NSpace size="small" style="margin-bottom: 6px">
+              <NTag size="small" :type="detail.judge.rubric.relevance <= 3 ? 'error' : 'success'">
+                relevance {{ detail.judge.rubric.relevance }}
+              </NTag>
+              <NTag size="small" :type="detail.judge.rubric.helpfulness <= 3 ? 'error' : 'success'">
+                helpfulness {{ detail.judge.rubric.helpfulness }}
+              </NTag>
+            </NSpace>
+            <NText v-if="detail.judge.rubric.reason" depth="3" style="font-size: 12px">
+              {{ detail.judge.rubric.reason }}
+            </NText>
+          </NCard>
 
           <NText depth="3" style="display: block; margin-bottom: 6px">
             检索到的 chunk（按相似度降序）：
@@ -373,11 +557,43 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
               </NSpace>
             </NListItem>
           </NList>
-          <NText depth="3" style="display: block; margin-top: 10px">
-            chunk 正文与幻觉证据将在 M4 生成侧评测接入后补充展示。
+          <NText depth="3" style="display: block; margin-top: 10px; font-size: 12px">
+            chunk 正文按需从向量库取（不落库, 见 process.md D17），排在 M4-4.1。
           </NText>
         </template>
       </NDrawerContent>
     </NDrawer>
   </div>
 </template>
+
+<style scoped>
+.answer-block {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.claim-row {
+  border-left: 4px solid transparent;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.claim-supported {
+  border-left-color: #18a058;
+  background: rgba(24, 160, 88, 0.08);
+}
+
+.claim-unsupported {
+  border-left-color: #d03050;
+  background: rgba(208, 48, 80, 0.1);
+}
+
+.claim-irrelevant {
+  border-left-color: #f0a020;
+  background: rgba(240, 160, 32, 0.1);
+}
+</style>

@@ -109,6 +109,45 @@ export interface RetrievedItem {
     score: number
 }
 
+// M4-1/M4-2: 生成与判定的落库结构(case_results.answer / generation / judge)。
+// 服务端从 M4-1 起就在返回这些字段, 前端直到 M4-4 才展示它们。
+
+export interface GenerationPayload {
+    model?: string
+    provider?: string
+    prompt_id?: string
+    temperature?: number
+    max_tokens?: number
+    prompt_tokens?: number
+    completion_tokens?: number
+    latency_ms?: number
+    context_chunks?: number
+    prompt_hash?: string
+}
+
+export type ClaimLabel = 'supported' | 'unsupported' | 'irrelevant'
+
+export interface JudgeClaim {
+    id: number
+    text: string
+    label: ClaimLabel
+    evidence?: string
+    reason?: string
+}
+
+export interface JudgeRubric {
+    relevance: number
+    helpfulness: number
+    reason?: string
+}
+
+export interface JudgePayload {
+    claims: JudgeClaim[]
+    /** 未启用 rubric 时为 null —— 展示层必须与 "0 分" 区分开。 */
+    rubric: JudgeRubric | null
+    meta: Record<string, unknown>
+}
+
 export interface RunCaseResult {
     case_id: number
     qid: string
@@ -117,8 +156,13 @@ export interface RunCaseResult {
     category?: string
     retrieved: RetrievedItem[]
     metrics: MetricsMap
+    /** 归因标签, 按优先级排序: flags[0] 即主因(process.md D16)。 */
     flags: string[]
     latency_ms?: number
+    /** 只跑检索的 run 里为空, 响应中省略。 */
+    answer?: string
+    generation?: GenerationPayload
+    judge?: JudgePayload
 }
 
 export interface RunReport {
