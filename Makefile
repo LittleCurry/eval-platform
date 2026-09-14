@@ -1,6 +1,6 @@
 .PHONY: help up-deps down-deps ps api migrate-up migrate-down migrate-version \
         migrate-create worker-setup worker-test worker-lint worker-healthcheck \
-        drill drill-compare compare parallel-demo test test-live lint verify
+        attribution drill drill-compare compare parallel-demo test test-live lint verify
 
 help: ## 显示可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F'## ' '{split($$1, t, ":"); printf "  \033[36m%-18s\033[0m %s\n", t[1], $$2}'
@@ -57,6 +57,11 @@ worker-lint: ## ruff 静态检查
 
 worker-healthcheck: ## worker 依赖连通性自检
 	cd worker && .venv/bin/python -m app.healthcheck
+
+# ---- 归因 (M4-3) ----
+attribution: ## 重算历史 run 的归因标签: make attribution RUN=112 [APPLY=1]
+	@test -n "$(RUN)" || (echo "用法: make attribution RUN=<run_id> [APPLY=1]"; exit 1)
+	cd worker && .venv/bin/python -m app.cli.attribution --run-id $(RUN) $(if $(APPLY),--apply,)
 
 # ---- 可靠性演练与一致性校验 (M3) ----
 drill: ## 故障演练(默认 v2 60 题; DATASET_ID=3 可跑 30 题快版)

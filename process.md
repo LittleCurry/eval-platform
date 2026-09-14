@@ -290,6 +290,30 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 
 ---
 
+### D15 归因规则与阈值进 `runs.metrics`，不进 `config_snapshot`
+
+**决策**：M4-3 起 `runs.metrics.attribution` 记录 `{version, scope, k, low_rank_limit, low_rank_ratio, quality_line}`；**归因的任何参数都不写入配置快照**，也不参与 `config_hash`。
+
+- **为什么不进快照**：快照进指纹（正是 D14 的反面）。若把 `attribution` 塞进快照，全部历史 run 的 `config_hash` 立刻作废，M2 以来"同 `config_hash` 跨代码版本指标逐位一致"的复现证据、以及 `compare_runs` 的"是否同一配置"判定会一起断掉。改口径是**重新解释既有事实**，不是换配置——它不该改变"这次实验是什么"的指纹。
+- **为什么必须记下来**：标签数依赖 k 与阈值，不记就无法跨 run 比较。实测：run #112（k=1）`retrieval_partial=12`，run #100/#155（k=5）只有 5 —— 同一批题、同一套规则，只因 k 不同就差了 7 条；`low_rank_limit` 在 k=1 时是 1（**永不触发**）、k=5 时是 3。
+- **为什么 `version` 也要记**：谓词或优先级一变，历史标签的含义就变了；`version` 是"这行标签按哪版规则打出来的"唯一凭据。
+- **`scope` 表达覆盖范围**：只跑检索的 run 是 `retrieval`（判定类标签一律不出），启用判定的是 `retrieval+judge`。**"没有判定"绝不能等价于"没有幻觉"**——这是 M4-2 rubric v1 负控（全编造答案拿到 5/5）换来的教训。
+- **阈值可覆盖，但用哪个记哪个**：`--quality-line` / `--low-rank-ratio` 允许探索（把达标线从 3 放到 4，run #155 立刻从 0 条质量标签变 10 条），但**用哪个值就必须记哪个值**，否则跨 run 的标签数不可比。
+
+---
+
+### D16 `flags` = 环节事实标签集，`flags[0]` 即主因（不新增列）
+
+**决策**：`case_results.flags` 是**多标签**的"环节事实"集合，数组顺序 = 固定优先级（上游 / 更严重者在前）；报告侧取 `flags[0]` 当主因，**不新增 `primary_flag` 列**，也不再单独落一份标签计数。
+
+- **为什么用"事实"而不是"责任"**：run #155 里 `retrieval_partial` 命中 5 题，而这 5 题**都没导致错答**（144 条断言全部 supported）——它描述"检索没做全"，不等于"这题答错了"。两类语义混成一列，报告就没法既报"风险"又报"责任"。
+- **为什么不在库里存主因**：主因是**规则优先级 + 当次阈值**的函数。存下来就多一个真相源，规则升级后必须全库回填；而"顺序即优先级"让任何读取方零成本推导。
+- **为什么计数派生而不落库**：`ListRunFlagCounts`（Go 侧 `jsonb_array_elements_text` 聚合）随查随算；重算 CLI 只改 `flags`，不会出现"计数与明细不一致"的过期数据。
+- **优先级表**：`no_gold > anchor_incomplete > retrieval_miss > retrieval_partial > retrieval_low_rank > hallucination > off_topic > generation_quality > no_claims`。两条容易被问：① `anchor_incomplete` 压过 `retrieval_miss` —— 没召回 gold 但断言全部有据，说明**锚点漏标**（数据问题），该修数据集而不是检索；② `generation_quality` 的前置是无幻觉且证据到位 —— 否则一个坏答案会在"幻觉"和"质量"两栏各计一次。
+- **`context_missing` 缺席（原计划里有）**：数据集锚点已验证 100% 覆盖，它在数据层**没有可计算谓词**；两种真实含义已被 `retrieval_miss`（系统没召回）与 `no_gold`/`anchor_incomplete`（标注问题）覆盖。要保留"语料里根本没这条知识"的语义，正确做法是标注 `answerable:false` 的无答案样本（`gold_anchors: []`），那时它才可计算（列入 v3）。
+
+---
+
 ## 5. 评测集建设指南（中文自建语料）
 
 > 这是全项目最容易卡、也最不能省的环节。**先小后大**：首个领域 20–50 篇源文档 + 30–100 题即可让 M2 出可信指标，之后迭代扩量。
@@ -439,18 +463,29 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 ### M4 生成侧评测 v1（Judge 与幻觉归因）
 
 **任务清单**
-- [ ] 生成链路（builtin）：调生成 LLM 产出 answer，记录 prompt id/模型/温度到配置快照
-- [ ] judge 协议 v1（自研 prompt + 严格 JSON 输出 + 解析校验）：
-  - [ ] claim 分解器（D4）
-  - [ ] claim × 检索上下文 entailment 判定（supported/unsupported/irrelevant）
-  - [ ] relevance/helpfulness rubric 打分（中文 rubric）
-- [ ] **归因规则落地**（§D10）：自动给 case 打 `retrieval_miss / hallucination / generation_quality / context_missing`
-- [ ] judge 缓存（D5/D8）；token 用量落库
-- [ ] 报告扩展：生成侧指标卡片 + 每题详情含 answer/claims/判定 + 幻觉文本高亮
-- [ ] 前端：case 详情抽屉（可折叠展示检索上下文 vs answer vs claims）
-- [ ] 测试：judge 解析异常重试、claim 分解与判定的小样例、归因规则单测、缓存命中不重调用
+- [x] （M4-1）生成链路（builtin）：调生成 LLM 产出 answer，记录 prompt id/模型/温度到配置快照（D14；基线 run #141）
+- [x] （M4-2）judge 协议 v1（自研 prompt + 严格 JSON 输出 + 解析校验）：
+  - [x] claim 分解器（D4）
+  - [x] claim × 检索上下文 entailment 判定（supported/unsupported/irrelevant）
+  - [x] relevance/helpfulness rubric 打分（中文 rubric，**v2**：加 `claims_summary` 占位符 + "有 unsupported 则 helpfulness ≤ 2" 硬规则）
+- [x] （M4-3）**归因规则落地**（D16）：`no_gold / anchor_incomplete / retrieval_miss / retrieval_partial / retrieval_low_rank / hallucination / off_topic / generation_quality / no_claims`（原计划的 `context_missing` 因无可计算谓词而缺席，理由见 D16）
+- [x] judge 缓存（D5/D8）；token 用量落库
+- [ ] （M4-4）报告扩展：生成侧指标卡片 + 每题详情含 answer/claims/判定 + 幻觉文本高亮
+- [ ] （M4-5）前端：case 详情抽屉（可折叠展示检索上下文 vs answer vs claims）
+- [x] 测试：judge 解析异常重试、claim 分解与判定的小样例、归因规则单测、缓存命中不重调用
 
-**验收标准**：跑 30 题能看到"幻觉率 X%、召回问题 N 条、幻觉 M 条"，且能点开看**具体是哪句答案在编**。（先接受 judge 可能不完美，M6 校准。）
+**验收标准**：跑 30 题能看到"幻觉率 X%、召回问题 N 条、幻觉 M 条"，且能点开看**具体是哪句答案在编**。（先接受 judge 可能不完美，M6 校准。）✅ **指标与归因数据已达成**（`runs.metrics` 三率 + `/runs/:id/report` 的 `flag_counts`）；"点开看哪句在编"的界面是 M4-4/M4-5。
+
+**M4-3 完成小结（2026-09-14）**
+
+- **规则内核**：`worker/app/eval/attribution.py`（纯函数、零 I/O）——同一套规则既服务队列落库，也服务 CLI 对历史 run 重算，**规则升级不需要重跑 LLM**（run #155 一次判定 101k judge tokens，重算 0 token）。阈值与规则版本进 `runs.metrics.attribution`（D15）。
+- **回放验收（真实数据，数字与卡片预测逐字吻合）**：run #112（k=1，只检索）→ `retrieval_miss=13 + retrieval_partial=12`；run #100（k=5）→ `retrieval_partial=5 + retrieval_low_rank=1`（zjc-027 排第 5）；run #155（k=5，生成+判定）→ 同上 6 条，`scope=retrieval+judge`，判定类标签 0。
+- **不动指纹**：`--apply` 前后 `config_hash` 逐字一致（`712f6b17` / `4e767020` / `449ca546`）；重算幂等（再跑一次"差异 0"）。
+- **端到端可见**：`GET /api/v1/runs/112/report` 直接返回 `flag_counts={'retrieval_miss':13,'retrieval_partial':12}`，**Go 侧零改动**（M2 时预埋的 `ListRunFlagCounts` 如期复用）。注意 `flag_counts` 只在 **report** 接口，不在 `/runs/:id` 详情接口。
+- **k=1 → k=5 的归因叙事（转 M5 的验收靶子）**：run #112 的 13 道 `retrieval_miss`，在 run #100 里 12 道变干净、1 道降级为 `retrieval_low_rank`，**0 道转成幻觉/质量问题** —— 即"提高 k 修好了 13 道检索漏召回，且全部修在检索环节"。
+- **工具边界（卡片写错、此处更正）**：`make compare` 是**一致性校验**工具（故障演练用），配置指纹不同时按设计拒绝并提示"请用 M5 的报告工具"；跨配置的标签差异属于 **M5 A/B 报告**，不是它该干的事。
+- **交付流程教训（已生效）**：修正已交付的文件必须**重发整份**，不能用"替换片段"。本轮我把两处修正给成片段，被贴成新增 → 同名测试函数重复定义、Python 取**最后一个** → 断言被旧版静默覆盖，`make worker-test` 报错才暴露。测试能抓到它，正是"每条规矩都要有用例守着"的价值。
+- **未做/转出**：① run #156（k=1 + 生成 + 判定）可量化"幻觉的根因是检索"，约 120k tokens，列为可选；② 用 `cases.reference_answer`（已在库，无需迁移）做"要点覆盖"检测 —— 可靠判定要第三次 LLM 调用（judge 成本 +50%），关键词覆盖又会产生假警报，等 M6 人工金标显示 judge 系统性漏判"漏答要点"时再做；③ 失败条目（`job_items` 终态 failed，无 `case_results` 行）在报告里不可见，归 M4-4。
 
 ---
 

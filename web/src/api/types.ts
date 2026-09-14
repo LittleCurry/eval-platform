@@ -73,6 +73,20 @@ export interface ImportReport {
 
 export type MetricsMap = Record<string, number>
 
+// M4-3(D15): 归因规则版本/覆盖范围/阈值。随 run 落库在 metrics.attribution,
+// 与数值指标同住一个 map —— 所以 run 级 metrics 不是纯 Record<string, number>。
+export interface AttributionMeta {
+    version: number
+    scope: 'retrieval' | 'retrieval+judge'
+    k: number
+    low_rank_limit: number
+    low_rank_ratio: number
+    quality_line: number
+}
+
+/** run 级指标: 数值指标 + 归因元信息。 */
+export type RunMetrics = MetricsMap & { attribution?: AttributionMeta }
+
 export interface Run {
     id: number
     project_id: number
@@ -81,7 +95,7 @@ export interface Run {
     status: string
     config_hash: string
     git_sha: string
-    metrics: MetricsMap
+    metrics: RunMetrics
     error?: string
     started_at?: string
     finished_at?: string
@@ -109,7 +123,7 @@ export interface RunCaseResult {
 
 export interface RunReport {
     run: Run
-    metrics: MetricsMap
+    metrics: RunMetrics
     worst_cases: RunCaseResult[]
     flag_counts: Record<string, number>
 }
