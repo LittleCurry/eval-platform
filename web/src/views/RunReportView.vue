@@ -40,6 +40,7 @@ import {
   answerSnippet,
   attributionText,
   claimLabel,
+  claimCounter,
   claimSummary,
   claimTagType,
   contextNotice,
@@ -281,11 +282,6 @@ function primaryFlagCell(row: RunCaseResult) {
       [h(NTag, { size: 'small', type: flagTagType(flag) }, { default: () => flagLabel(flag) })])
 }
 
-function claimsCell(row: RunCaseResult) {
-  const summary = claimSummary(row.judge)
-  return summary === null ? h(NText, { depth: 3 }, { default: () => '—' }) : summary
-}
-
 function rubricCell(row: RunCaseResult) {
   const summary = rubricSummary(row.judge)
   if (summary === null) return h(NText, { depth: 3 }, { default: () => '—' })
@@ -293,90 +289,97 @@ function rubricCell(row: RunCaseResult) {
   return h('span', { title: reason }, [summary])
 }
 
+/**
+ * 断言列用紧凑计数 "支持/无据/无关"(列宽只有 96px, 长文案会被裁)。
+ * 出现"无据/无关"时标红 —— 一行坏答案在表里第一眼就该被看见。
+ */
+function claimsCell(row: RunCaseResult) {
+  const counts = claimCounter(row.judge)
+  if (counts === null) return h(NText, { depth: 3 }, { default: () => '—' })
+  const title = `${counts.supported} 有据 / ${counts.unsupported} 无据 / ${counts.irrelevant} 无关`
+  const text = `${counts.supported}/${counts.unsupported}/${counts.irrelevant}`
+  if (counts.unsupported > 0 || counts.irrelevant > 0) {
+    return h('span', { title, style: 'color: #d03050; font-weight: 600' }, [text])
+  }
+  return h('span', { title, style: 'color: rgba(127, 127, 127, 0.9)' }, [text])
+}
+
 function answerCell(row: RunCaseResult) {
-  const snippet = answerSnippet(row.answer)
-  if (snippet === null) return h(NText, { depth: 3 }, { default: () => '—' })
-  return h('span', { title: row.answer ?? '' }, [snippet])
+  // 不截断(交给列宽省略 + 悬浮 tooltip), 只做单行化, 免得 tooltip 也只剩半句
+  return answerSnippet(row.answer, 0) ?? h(NText, { depth: 3 }, { default: () => '—' })
+}
+
+// 列宽合计 = 固定列 + 问题列(自适应)。容器可用宽度约 1110px(1200 上限 - 两侧留白),
+// 所以刻意把固定列压在 ~890px, 留 200px 以上给"问题"; 同时给表格设 scroll-x,
+// 窗口更窄时改为横向滚动, 而不是把右边的列裁掉。
+const CASE_TABLE_SCROLL_X = 1086
+const WORST_TABLE_SCROLL_X = 776
+
+const qidColumn: DataTableColumns<RunCaseResult>[number] = {
+  // 固定在左侧: 横向滚动时也知道自己在看哪一题
+  title: 'qid',
+  key: 'qid',
+  width: 96,
+  fixed: 'left',
+}
+
+const difficultyColumn: DataTableColumns<RunCaseResult>[number] = {
+  title: '难度',
+  key: 'difficulty',
+  width: 64,
+  render: (row) =>
+      row.difficulty
+          ? h(NTag, { size: 'small', type: difficultyTagType(row.difficulty) }, { default: () => row.difficulty })
+          : null,
+}
+
+const actionColumn: DataTableColumns<RunCaseResult>[number] = {
+  title: '操作',
+  key: 'actions',
+  width: 92,
+  fixed: 'right',
+  render: (row) =>
+      h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => '详情' }),
 }
 
 const worstColumns: DataTableColumns<RunCaseResult> = [
-  { title: 'qid', key: 'qid', width: 110 },
+  qidColumn,
   { title: '问题', key: 'question', ellipsis: { tooltip: true } },
+  difficultyColumn,
+  { title: 'Recall', key: 'recall', width: 82, render: (row) => formatPercent(row.metrics?.recall) },
   {
-    title: '难度',
-    key: 'difficulty',
-    width: 80,
-    render: (row) =>
-        row.difficulty
-            ? h(NTag, { size: 'small', type: difficultyTagType(row.difficulty) }, { default: () => row.difficulty })
-            : null,
-  },
-  { title: 'Recall', key: 'recall', width: 90, render: (row) => formatPercent(row.metrics?.recall) },
-  {
-    title: '首个命中位次',
+    title: '首个命中',
     key: 'first_hit_rank',
-    width: 120,
+    width: 110,
     render: (row) => (row.metrics?.first_hit_rank ? `第 ${row.metrics.first_hit_rank} 位` : '未命中'),
   },
-  { title: '主因', key: 'primary_flag', width: 150, render: (row) => primaryFlagCell(row) },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 110,
-    render: (row) =>
-        h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => 'case 详情' }),
-  },
+  { title: '主因', key: 'primary_flag', width: 132, render: (row) => primaryFlagCell(row) },
+  actionColumn,
 ]
 
 const caseColumns: DataTableColumns<RunCaseResult> = [
-  { title: 'qid', key: 'qid', width: 110 },
+  qidColumn,
   { title: '问题', key: 'question', ellipsis: { tooltip: true } },
-  {
-    title: '难度',
-    key: 'difficulty',
-    width: 80,
-    render: (row) =>
-        row.difficulty
-            ? h(NTag, { size: 'small', type: difficultyTagType(row.difficulty) }, { default: () => row.difficulty })
-            : null,
-  },
-  {
-    title: '类别',
-    key: 'category',
-    width: 100,
-    render: (row) => row.category || '—',
-  },
-  { title: 'Recall', key: 'recall', width: 90, render: (row) => formatPercent(row.metrics?.recall) },
+  difficultyColumn,
+  { title: 'Recall', key: 'recall', width: 82, render: (row) => formatPercent(row.metrics?.recall) },
   {
     title: 'MRR',
     key: 'rr',
-    width: 80,
+    width: 72,
     render: (row) => formatScore(row.metrics?.reciprocal_rank),
   },
-  { title: '主因', key: 'primary_flag', width: 150, render: (row) => primaryFlagCell(row) },
-  { title: '断言', key: 'claims', width: 170, render: (row) => claimsCell(row) },
-  { title: 'rubric', key: 'rubric', width: 80, render: (row) => rubricCell(row) },
-  { title: '答案', key: 'answer', width: 220, render: (row) => answerCell(row) },
+  { title: '主因', key: 'primary_flag', width: 132, render: (row) => primaryFlagCell(row) },
+  { title: '断言', key: 'claims', width: 96, render: (row) => claimsCell(row) },
+  { title: 'rubric', key: 'rubric', width: 72, render: (row) => rubricCell(row) },
   {
-    title: '全部标签',
-    key: 'flags',
-    width: 140,
-    render: (row) =>
-        row.flags && row.flags.length
-            ? h(NSpace, { size: 4 }, {
-              default: () => row.flags.map((flag) =>
-                  h(NTag, { size: 'small', type: flagTagType(flag) }, { default: () => flagLabel(flag) }),
-              ),
-            })
-            : h(NText, { depth: 3 }, { default: () => '—' }),
+    title: '答案',
+    key: 'answer',
+    width: 180,
+    // 交给表格做省略 + 悬浮显示全文: 单元格里再截断一次会让 tooltip 也只剩半句
+    ellipsis: { tooltip: true },
+    render: (row) => answerCell(row),
   },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 110,
-    render: (row) =>
-        h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => 'case 详情' }),
-  },
+  actionColumn,
 ]
 </script>
 
@@ -508,6 +511,7 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
           :columns="worstColumns"
           :data="report.worst_cases"
           :row-key="(row: RunCaseResult) => row.case_id"
+          :scroll-x="WORST_TABLE_SCROLL_X"
           size="small"
       />
     </NCard>
@@ -525,6 +529,7 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
           :data="filteredCases"
           :loading="loading"
           :row-key="(row: RunCaseResult) => row.case_id"
+          :scroll-x="CASE_TABLE_SCROLL_X"
           size="small"
       />
     </NCard>
@@ -545,6 +550,14 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
           <NText style="display: block; margin-bottom: 8px">{{ detail.question }}</NText>
 
           <NSpace size="small" style="margin-bottom: 12px">
+            <NTag v-if="detail.category" size="small" :bordered="false">{{ detail.category }}</NTag>
+            <NTag
+                v-if="detail.difficulty"
+                size="small"
+                :type="difficultyTagType(detail.difficulty)"
+            >
+              {{ detail.difficulty }}
+            </NTag>
             <NTag size="small">Recall {{ formatPercent(detail.metrics?.recall) }}</NTag>
             <NTag size="small">gold 数 {{ detail.metrics?.gold_count ?? '—' }}</NTag>
             <NTag size="small">命中 {{ detail.metrics?.hits ?? '—' }}</NTag>

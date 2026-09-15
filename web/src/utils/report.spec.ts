@@ -3,6 +3,7 @@ import type { CaseContextResponse, JudgePayload, RunMetrics } from '../api/types
 import {
     answerSnippet,
     attributionText,
+    claimCounter,
     contextNotice,
     fallbackContextRows,
     claimLabel,
@@ -64,6 +65,17 @@ describe('flagTagType', () => {
     })
 })
 
+describe('claimCounter', () => {
+    it('给出三种断言的条数(表格与抽屉共用同一口径)', () => {
+        expect(claimCounter(judge())).toEqual({ supported: 1, unsupported: 1, irrelevant: 1 })
+    })
+
+    it('无判定或无断言时返回 null', () => {
+        expect(claimCounter(undefined)).toBeNull()
+        expect(claimCounter({ claims: [], rubric: null, meta: {} })).toBeNull()
+    })
+})
+
 describe('claimSummary', () => {
     it('按三种标签计数', () => {
         expect(claimSummary(judge())).toBe('1 支持 / 1 无据 / 1 无关')
@@ -106,6 +118,12 @@ describe('answerSnippet', () => {
     it('空答案与空白答案返回 null', () => {
         expect(answerSnippet(undefined)).toBeNull()
         expect(answerSnippet('   ')).toBeNull()
+    })
+
+    it('length<=0 表示不截断(表格靠列宽省略 + tooltip 显示全文)', () => {
+        const long = '一'.repeat(300)
+        expect(answerSnippet(long, 0)).toBe(long)
+        expect(answerSnippet('  多   空格  ', 0)).toBe('多 空格')
     })
 })
 

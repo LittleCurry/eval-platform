@@ -45,12 +45,30 @@ export function flagTagType(flag?: string | null): TagType {
     return 'default'
 }
 
-/** 断言计数文案; 没有判定或没有断言时返回 null(调用方显示占位符)。 */
-export function claimSummary(judge?: JudgePayload | null): string | null {
+/**
+ * 三种断言的条数; 没有判定或没有断言时返回 null(调用方显示占位符)。
+ * 表格用紧凑计数、抽屉用长文案, 都从这里取数, 保证两处口径一致。
+ */
+export function claimCounter(judge?: JudgePayload | null): {
+    supported: number
+    unsupported: number
+    irrelevant: number
+} | null {
     const claims = judge?.claims
     if (!claims || claims.length === 0) return null
     const count = (label: string) => claims.filter((claim) => claim.label === label).length
-    return `${count('supported')} 支持 / ${count('unsupported')} 无据 / ${count('irrelevant')} 无关`
+    return {
+        supported: count('supported'),
+        unsupported: count('unsupported'),
+        irrelevant: count('irrelevant'),
+    }
+}
+
+/** 断言计数文案(抽屉用); 没有判定或没有断言时返回 null。 */
+export function claimSummary(judge?: JudgePayload | null): string | null {
+    const counts = claimCounter(judge)
+    if (counts === null) return null
+    return `${counts.supported} 支持 / ${counts.unsupported} 无据 / ${counts.irrelevant} 无关`
 }
 
 /** rubric 摘要: "R5 H4"; **没打分返回 null —— 不能显示成 0 分**(缺失 != 合格)。 */
@@ -87,10 +105,15 @@ export function claimTagType(label: string): TagType {
     }
 }
 
-/** 答案摘要(列表列用); 空白答案返回 null, 不显示空壳。 */
+/**
+ * 答案单行化; 空白答案返回 null, 不显示空壳。
+ * length <= 0 表示不截断 —— 表格列自己会做省略并在悬浮时显示全文,
+ * 这里再截一刀只会让 tooltip 也只剩半句。
+ */
 export function answerSnippet(answer?: string, length = 40): string | null {
     const text = (answer ?? '').replace(/\s+/g, ' ').trim()
     if (!text) return null
+    if (length <= 0) return text
     return text.length <= length ? text : `${text.slice(0, length)}…`
 }
 
