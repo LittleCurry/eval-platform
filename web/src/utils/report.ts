@@ -3,7 +3,13 @@
 // 中文标签与 worker 侧 FLAG_ZH 一一对应 —— 唯一来源是 worker/app/eval/attribution.py。
 // 两边各译一套就会出现"报告说幻觉、抽屉说无据"的错位, 所以改动那边时这里要同步。
 
-import type { GenerationPayload, JudgePayload, RunMetrics } from '../api/types'
+import type {
+    CaseContextResponse,
+    GenerationPayload,
+    JudgePayload,
+    RetrievedItem,
+    RunMetrics,
+} from '../api/types'
 import type { TagType } from './format'
 
 /** 归因标签的中文名(与 worker/app/eval/attribution.py 的 FLAG_ZH 同步)。 */
@@ -143,4 +149,49 @@ export function attributionText(metrics?: RunMetrics): string | null {
 export function missingCaseNotice(failed?: number | null): string | null {
     if (!failed || failed <= 0) return null
     return `本次有 ${failed} 条未产出结果（重试耗尽），它们不在下面的明细里 —— 别把"没跑"当成"跑对了"`
+}
+
+// ---- 检索上下文(M4-4.1) ----
+
+/** 抽屉里"检索上下文"的一行: 正文可能来自向量库, 也可能是本地兜底的骨架。 */
+export interface ContextRow {
+    point_id: string
+    doc_id: string
+    score?: number
+    section: string
+    text: string
+    found: boolean
+}
+
+/**
+ * 取不到正文时的兜底(旧后端/降级/断网): 只列 retrieved 的骨架。
+ * 至少让同事看到"这道题检索了哪几个 chunk", 而不是一片空白。
+ */
+export function fallbackContextRows(retrieved?: RetrievedItem[]): ContextRow[] {
+    if (!retrieved || retrieved.length === 0) return []
+    return retrieved.map((item) => ({
+        point_id: item.point_id,
+        doc_id: item.doc_id ?? '',
+        score: item.score,
+        section: '',
+        text: '',
+        found: false,
+    }))
+}
+
+/**
+ * 上下文面板的提示: 后端给的降级原因优先, 其次是"部分正文缺失"的统计。
+ * 一切正常返回 null(不打扰)。found=false 的条数要单独说清楚 ——
+ * 否则"集合被重建"会被误读成"这道题本来就没有上下文"。
+ */
+export function contextNotice(response?: CaseContextResponse | null): string | null {
+    if (!response) return null
+    if (response.error) return `chunk 正文暂不可用：${response.error}`
+    const chunks = response.chunks ?? []
+    if (chunks.length === 0) return null
+    const missing = chunks.filter((chunk) => !chunk.found).length
+    if (missing > 0) {
+        return `${missing}/${chunks.length} 条 chunk 正文缺失（该 point 不在当前集合里，索引可能被重建过）`
+    }
+    return null
 }

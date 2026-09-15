@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { JudgePayload, RunMetrics } from '../api/types'
+import type { CaseContextResponse, JudgePayload, RunMetrics } from '../api/types'
 import {
     answerSnippet,
     attributionText,
+    contextNotice,
+    fallbackContextRows,
     claimLabel,
     claimSummary,
     claimTagType,
@@ -197,5 +199,62 @@ describe('missingCaseNotice', () => {
     it('没有失败条目时不打扰', () => {
         expect(missingCaseNotice(0)).toBeNull()
         expect(missingCaseNotice(undefined)).toBeNull()
+    })
+})
+describe('fallbackContextRows', () => {
+    it('取不到正文时退化成骨架, found 全为 false', () => {
+        const rows = fallbackContextRows([
+            { point_id: 'p1', doc_id: 'B02', score: 0.91 },
+            { point_id: 'p2', doc_id: 'D01', score: 0.8 },
+        ])
+        expect(rows).toHaveLength(2)
+        expect(rows[0]).toEqual({
+            point_id: 'p1', doc_id: 'B02', score: 0.91, section: '', text: '', found: false,
+        })
+    })
+
+    it('没有 retrieved 时返回空数组, 不抛错', () => {
+        expect(fallbackContextRows(undefined)).toEqual([])
+        expect(fallbackContextRows([])).toEqual([])
+    })
+})
+
+describe('contextNotice', () => {
+    function response(over: Partial<CaseContextResponse> = {}): CaseContextResponse {
+        return {
+            collection: 'corpus4_5f45e034',
+            chunks: [
+                { point_id: 'p1', doc_id: 'B02', text: '正文', found: true },
+                { point_id: 'p2', doc_id: 'D01', text: '正文', found: true },
+            ],
+            ...over,
+        }
+    }
+
+    it('一切正常时不打扰', () => {
+        expect(contextNotice(response())).toBeNull()
+        expect(contextNotice(null)).toBeNull()
+        expect(contextNotice(undefined)).toBeNull()
+    })
+
+    it('后端的降级原因优先展示', () => {
+        const notice = contextNotice(response({ error: '向量库未配置, 无法取回 chunk 正文' }))
+        expect(notice).toContain('chunk 正文暂不可用')
+        expect(notice).toContain('向量库未配置')
+    })
+
+    it('部分缺失要说清条数(别被误读成"本来就没有上下文")', () => {
+        const notice = contextNotice(response({
+            chunks: [
+                { point_id: 'p1', found: true, text: 'x' },
+                { point_id: 'p2', found: false },
+                { point_id: 'p3', found: false },
+            ],
+        }))
+        expect(notice).toContain('2/3 条 chunk 正文缺失')
+    })
+
+    it('空 chunk 列表不算异常(该题没有检索结果)', () => {
+        expect(contextNotice(response({ chunks: [] }))).toBeNull()
     })
 })

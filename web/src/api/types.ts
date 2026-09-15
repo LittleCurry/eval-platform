@@ -172,6 +172,27 @@ export interface RunReport {
     flag_counts: Record<string, number>
 }
 
+// M4-4.1: 按需从向量库取回的 chunk 正文(不落库, 见 process.md D17)。
+
+export interface CaseContextChunk {
+    point_id: string
+    doc_id?: string
+    score?: number
+    section?: string
+    text?: string
+    /** false = 向量库里查不到这个 point(集合被重建过), 展示层显示"正文缺失"。 */
+    found: boolean
+}
+
+export interface CaseContextResponse {
+    /** 本次取正文用的 Qdrant 集合名(corpus{id}_{切分指纹前 8 位})。 */
+    collection: string
+    /** 与 case_results.retrieved 同顺序。 */
+    chunks: CaseContextChunk[]
+    /** 非空表示这次取不到正文(向量库不可用等): 其余内容照常展示, 只有这块降级。 */
+    error?: string
+}
+
 // ---- 任务进度(jobs) ----
 
 export interface JobProgress {

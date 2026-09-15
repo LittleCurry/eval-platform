@@ -23,8 +23,8 @@ import {
   NTag,
   NText,
 } from 'naive-ui'
-import { getRunCaseResults, getRunProgress, getRunReport } from '../api/runs'
-import type { RunCaseResult, RunProgress, RunReport } from '../api/types'
+import { getCaseContext, getRunCaseResults, getRunProgress, getRunReport } from '../api/runs'
+import type { CaseContextResponse, RunCaseResult, RunProgress, RunReport } from '../api/types'
 import {
   difficultyTagType,
   formatDateTime,
@@ -42,6 +42,8 @@ import {
   claimLabel,
   claimSummary,
   claimTagType,
+  contextNotice,
+  fallbackContextRows,
   flagLabel,
   flagTagType,
   generationSummary,
@@ -66,6 +68,11 @@ const flagFilter = ref<string | null>(null)
 const detail = ref<RunCaseResult | null>(null)
 const showDetail = ref(false)
 const autoRefresh = ref(true)
+// M4-4.1: 抽屉里那块"检索上下文正文"(打开时按需从向量库取)
+const context = ref<CaseContextResponse | null>(null)
+const contextLoading = ref(false)
+const contextErrorText = ref('')
+let contextSeq = 0
 
 const POLL_INTERVAL_MS = 3000
 let timer: number | undefined
@@ -123,9 +130,29 @@ async function toggleFlagged(value: boolean) {
   }
 }
 
-function openDetail(row: RunCaseResult) {
+/**
+ * 打开抽屉并**按需取回 chunk 正文**(M4-4.1)。
+ *
+ * 正文只在向量库里有一份、不落库(D17), 所以只能打开时现取; 用自增序号挡住竞态:
+ * 快速点开另一题时, 先发出的请求可能后回来, 不挡的话会把正文显示成上一题的。
+ */
+async function openDetail(row: RunCaseResult) {
   detail.value = row
   showDetail.value = true
+  context.value = null
+  contextErrorText.value = ''
+  contextLoading.value = true
+  const seq = ++contextSeq
+  try {
+    const response = await getCaseContext(runId.value, row.case_id)
+    if (seq !== contextSeq) return
+    context.value = response
+  } catch (err) {
+    if (seq !== contextSeq) return
+    contextErrorText.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    if (seq === contextSeq) contextLoading.value = false
+  }
 }
 
 /** 点标签统计即按该标签筛选(数据已在本地 200 条内, 不必再打接口)。 */
@@ -142,6 +169,33 @@ const filteredCases = computed(() => {
 const detailClaims = computed(() => detail.value?.judge?.claims ?? [])
 const detailPrimaryFlag = computed(() => primaryFlag(detail.value?.flags))
 const detailGeneration = computed(() => generationSummary(detail.value?.generation))
+
+// ---- 检索上下文正文(M4-4.1) ----
+
+/**
+ * 抽屉里要显示的 chunk 行: 优先用向量库取回的正文;
+ * 取不到(旧后端/降级/断网)时回落到 retrieved 的骨架, 至少还能看到"检索了什么"。
+ */
+const detailContextRows = computed(() => {
+  const chunks = context.value?.chunks
+  if (chunks && chunks.length > 0) {
+    return chunks.map((chunk) => ({
+      point_id: chunk.point_id,
+      doc_id: chunk.doc_id ?? '',
+      score: chunk.score,
+      section: chunk.section ?? '',
+      text: chunk.text ?? '',
+      found: chunk.found,
+    }))
+  }
+  return fallbackContextRows(detail.value?.retrieved)
+})
+
+/** 降级提示: 网络层错误优先, 其次是后端给的 error / 缺失统计。 */
+const detailContextNotice = computed(() => {
+  if (contextErrorText.value) return `chunk 正文暂不可用：${contextErrorText.value}`
+  return contextNotice(context.value)
+})
 
 // ---- 生成侧 / 判定侧指标(M4-4) ----
 
@@ -546,19 +600,38 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
           </NCard>
 
           <NText depth="3" style="display: block; margin-bottom: 6px">
-            检索到的 chunk（按相似度降序）：
+            检索到的 chunk（按相似度降序，正文按需从向量库取）：
           </NText>
+          <NAlert v-if="contextLoading" type="info" :show-icon="false" style="margin-bottom: 8px">
+            正在取回 chunk 正文…
+          </NAlert>
+          <NAlert v-else-if="detailContextNotice" type="warning" :show-icon="false" style="margin-bottom: 8px">
+            {{ detailContextNotice }}
+          </NAlert>
           <NList bordered size="small">
-            <NListItem v-for="(item, index) in detail.retrieved" :key="item.point_id">
-              <NSpace align="center">
-                <NTag size="small" :bordered="false">#{{ index + 1 }}</NTag>
-                <NText code>{{ item.doc_id || '—' }}</NText>
-                <NText depth="3">score {{ formatScore(item.score) }}</NText>
-              </NSpace>
+            <NListItem v-for="(item, index) in detailContextRows" :key="item.point_id">
+              <div class="chunk-row" :class="{ 'chunk-row-missing': !item.found }">
+                <NSpace align="center" :size="6" style="margin-bottom: 4px">
+                  <NTag size="small" :bordered="false">#{{ index + 1 }}</NTag>
+                  <NText code>{{ item.doc_id || '—' }}</NText>
+                  <NText depth="3">score {{ formatScore(item.score) }}</NText>
+                  <NTag v-if="detail.metrics?.first_hit_rank === index + 1" size="tiny" type="success">
+                    首命中（gold）
+                  </NTag>
+                </NSpace>
+                <NText v-if="item.section" depth="3" style="display: block; font-size: 12px">
+                  {{ item.section }}
+                </NText>
+                <div v-if="item.found && item.text" class="chunk-text">{{ item.text }}</div>
+                <NText v-else depth="3" style="display: block; font-size: 12px">
+                  正文缺失（该 point 不在当前集合里，索引可能被重建过）
+                </NText>
+              </div>
             </NListItem>
           </NList>
           <NText depth="3" style="display: block; margin-top: 10px; font-size: 12px">
-            chunk 正文按需从向量库取（不落库, 见 process.md D17），排在 M4-4.1。
+            正文不落库、按需从向量库取（见 process.md D17）；集合名由语料库 + 切分指纹推导，
+            所以历史 run 也能看到当时那份上下文。
           </NText>
         </template>
       </NDrawerContent>
@@ -595,5 +668,27 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
 .claim-irrelevant {
   border-left-color: #f0a020;
   background: rgba(240, 160, 32, 0.1);
+}
+
+/* M4-4.1: 上下文正文块。限高 + 内部滚动 —— 抽屉本身不该被一整篇 chunk 撑爆。 */
+.chunk-row {
+  width: 100%;
+}
+
+.chunk-row-missing {
+  opacity: 0.75;
+}
+
+.chunk-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+  font-size: 12px;
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.08);
 }
 </style>
