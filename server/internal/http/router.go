@@ -17,6 +17,7 @@ type Deps struct {
 	Datasets       DatasetStore
 	Cases          CaseStore
 	Runs           RunStore
+	QdrantPoints   QdrantPointStore
 	EvalEmbedding  eval.EmbeddingConfig
 	EvalGeneration eval.GenerationConfig
 	EvalJudge      eval.JudgeConfig
@@ -39,6 +40,7 @@ func NewRouter(d Deps) *gin.Engine {
 	datasets := newDatasetHandler(d.Datasets)
 	cases := newCaseHandler(d.Cases)
 	runs := newRunHandler(d.Runs, d.EvalEmbedding, d.EvalGeneration, d.EvalJudge)
+	runContext := newRunContextHandler(d.Runs, d.QdrantPoints)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)
@@ -67,5 +69,6 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.GET("/runs/:id/case-results", runs.CaseResults)
 	v1.GET("/runs/:id/report", runs.Report)
 	v1.GET("/runs/:id/progress", runs.Progress)
+	v1.GET("/runs/:id/cases/:case_id/context", runContext.CaseContext)
 	return r
 }

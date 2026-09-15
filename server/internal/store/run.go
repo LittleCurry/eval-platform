@@ -149,6 +149,45 @@ func (p *Postgres) ListRunCaseResults(
 	return out, rows.Err()
 }
 
+// GetRunCaseResult 取单题结果(M4-4.1)。
+//
+// 抽屉要"上下文 vs 答案"并排, 就得先知道这道题检索了哪些 point, 再去向量库换正文;
+// 复用一个只看单条的行读取, 避免把整份单题结果(含 answer/judge)拉回来再筛。
+func (p *Postgres) GetRunCaseResult(ctx context.Context, runID, caseID int64) (RunCaseResult, error) {
+	var item RunCaseResult
+	var retrieved, metrics, flags, generation, judge string
+	var latency sql.NullInt64
+
+	err := p.db.QueryRowContext(ctx, `
+		SELECT cr.case_id, c.qid, c.question,
+		       COALESCE(c.difficulty, ''), COALESCE(c.category, ''),
+		       cr.retrieved::text, cr.metrics::text, cr.flags::text, cr.latency_ms,
+		       COALESCE(cr.answer, ''), COALESCE(cr.generation::text, '{}'),
+		       COALESCE(cr.judge::text, '{}')
+		FROM case_results cr
+		JOIN cases c ON c.id = cr.case_id
+		WHERE cr.run_id = $1 AND cr.case_id = $2`, runID, caseID,
+	).Scan(&item.CaseID, &item.QID, &item.Question, &item.Difficulty, &item.Category,
+		&retrieved, &metrics, &flags, &latency, &item.Answer, &generation, &judge)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunCaseResult{}, ErrNotFound
+	}
+	if err != nil {
+		return RunCaseResult{}, err
+	}
+
+	item.Retrieved = parseJSONList(retrieved)
+	item.Metrics = parseJSONMap(metrics)
+	item.Flags = parseJSONStrings(flags)
+	item.Generation = parseJSONMap(generation)
+	item.Judge = parseJSONMap(judge)
+	if latency.Valid {
+		value := int(latency.Int64)
+		item.LatencyMS = &value
+	}
+	return item, nil
+}
+
 // ListRunFlagCounts 统计某次 run 各归因标签的数量(M4 起有值; 现在通常为空)。
 func (p *Postgres) ListRunFlagCounts(ctx context.Context, runID int64) (map[string]int, error) {
 	rows, err := p.db.QueryContext(ctx, `

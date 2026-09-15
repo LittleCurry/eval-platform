@@ -35,6 +35,8 @@ func main() {
 		Datasets:  pg,
 		Cases:     pg,
 		Runs:      pg,
+		// 同一个 Qdrant 客户端兼作"按 id 取 chunk 正文"(M4-4.1): 报告抽屉要用上下文原文
+		QdrantPoints: qd,
 		EvalEmbedding: eval.EmbeddingConfig{
 			Provider:  cfg.EmbeddingProvider,
 			BaseURL:   cfg.EmbeddingBaseURL,
