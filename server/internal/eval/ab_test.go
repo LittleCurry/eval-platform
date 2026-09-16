@@ -289,3 +289,138 @@ func TestComputeABNoWarningWhenNeitherSideHasAttribution(t *testing.T) {
 		t.Fatalf("两侧都没做过时不该警告: %q", report.AttributionMissing)
 	}
 }
+
+// ---- 生成侧指标(M5-1 尾巴) ----
+
+func abJudged(qid string, recall float64, claims, unsupported int, rubric *float64) ABCase {
+	item := abCase(qid, "线索", "易", recall)
+	item.Judge = &ABJudge{Claims: claims, Supported: claims - unsupported, Unsupported: unsupported}
+	if rubric != nil {
+		item.Judge.HasRubric = true
+		item.Judge.Helpfulness = *rubric
+		item.Judge.Relevance = *rubric
+	}
+	return item
+}
+
+func TestComputeABGenerationMetricsUseOnlyJudgedPairs(t *testing.T) {
+	// q1/q2 两侧都有判定(可配对); q3 只有左侧有判定 -> 必须被排除,
+	// 否则"右侧没判定"会被读成"右侧零幻觉"(M4-2 的老教训)
+	score := 4.0
+	left := []ABCase{
+		abJudged("q1", 1, 4, 0, &score),
+		abJudged("q2", 1, 4, 2, &score),
+		abJudged("q3", 1, 4, 4, &score),
+	}
+	right := []ABCase{
+		abJudged("q1", 1, 4, 0, &score),
+		abJudged("q2", 1, 4, 0, &score),
+		abCase("q3", "线索", "易", 1), // 无判定
+	}
+
+	report := ComputeAB(left, right, ABOptions{IncludeGeneration: true})
+
+	if report.JudgedCases != 2 {
+		t.Fatalf("q3 只有左侧有判定 -> 两侧都有判定的题数是 2, 实际 %d", report.JudgedCases)
+	}
+	hallucination := report.Summary["hallucination_rate"]
+	if hallucination.Cases != 2 {
+		t.Fatalf("只有 2 题两侧都有断言, 实际 %d", hallucination.Cases)
+	}
+	// 左: (0/4 + 2/4)/2 = 0.25; 右: 0 —— 必须只算这两题, 不能把 q3 的 4/4 混进来
+	if hallucination.Left != 0.25 || hallucination.Right != 0 {
+		t.Fatalf("幻觉率均值算错: %+v", hallucination)
+	}
+	if hallucination.Improved != 1 || hallucination.Worsened != 0 {
+		t.Fatalf("q2 从 0.5 降到 0 应记 1 个改善: %+v", hallucination)
+	}
+}
+
+func TestComputeABGenerationMetricsSkipCasesWithoutClaims(t *testing.T) {
+	// 答案只说"资料中未提及"-> claims=0 -> 三个率无意义, 不进样本; 但 rubric 仍可比
+	score := 4.0
+	left := []ABCase{abJudged("q1", 1, 0, 0, &score), abJudged("q2", 1, 4, 1, &score)}
+	right := []ABCase{abJudged("q1", 1, 0, 0, &score), abJudged("q2", 1, 4, 0, &score)}
+
+	report := ComputeAB(left, right, ABOptions{IncludeGeneration: true})
+
+	if report.Summary["hallucination_rate"].Cases != 1 {
+		t.Fatalf("claims=0 的题不该进率值样本: %+v", report.Summary["hallucination_rate"])
+	}
+	if report.Summary["helpfulness"].Cases != 2 {
+		t.Fatalf("有 rubric 的题都该进分数样本: %+v", report.Summary["helpfulness"])
+	}
+}
+
+func TestComputeABGenerationMetricsNeedRubricOnBothSides(t *testing.T) {
+	// 一侧没打 rubric -> 分数指标不可比(不能把"没打分"当成 0 分)
+	score := 5.0
+	left := []ABCase{abJudged("q1", 1, 4, 0, &score)}
+	right := []ABCase{abJudged("q1", 1, 4, 0, nil)}
+
+	report := ComputeAB(left, right, ABOptions{IncludeGeneration: true})
+
+	if report.Summary["helpfulness"].Cases != 0 {
+		t.Fatalf("两侧都缺 rubric 时不该有样本: %+v", report.Summary["helpfulness"])
+	}
+	if report.Summary["hallucination_rate"].Cases != 1 {
+		t.Fatalf("率值仍可比(两侧都有断言): %+v", report.Summary["hallucination_rate"])
+	}
+}
+
+func TestComputeABGenerationNoteWhenNoJudgeAtAll(t *testing.T) {
+	// 只跑检索的两次 run: 生成侧没有任何可配对的判定 -> 必须说明"为什么没得比",
+	// 而不是给出一排 0 让人误以为"两次都没有幻觉"
+	left := []ABCase{abCase("q1", "线索", "易", 1), abCase("q2", "线索", "易", 0)}
+	right := []ABCase{abCase("q1", "线索", "易", 1), abCase("q2", "线索", "易", 1)}
+
+	report := ComputeAB(left, right, ABOptions{IncludeGeneration: true})
+
+	if report.JudgedCases != 0 {
+		t.Fatalf("没有判定时配对样本应为 0: %d", report.JudgedCases)
+	}
+	if !strings.Contains(report.GenerationNote, "没有判定") {
+		t.Fatalf("要说明原因: %q", report.GenerationNote)
+	}
+	if report.Summary["hallucination_rate"].Cases != 0 {
+		t.Fatalf("没有判定时不该有样本量: %+v", report.Summary["hallucination_rate"])
+	}
+}
+
+func TestComputeABRetrievalMetricsReportCaseCount(t *testing.T) {
+	// 检索侧指标的样本量 = 共同题目数(前端要把这个数显示出来)
+	left := []ABCase{abCase("q1", "线索", "易", 1), abCase("q2", "线索", "易", 0)}
+	right := []ABCase{abCase("q1", "线索", "易", 1), abCase("q2", "线索", "易", 1)}
+
+	report := ComputeAB(left, right, ABOptions{})
+
+	if report.Summary["recall"].Cases != 2 {
+		t.Fatalf("检索侧样本量应为共同题目数: %+v", report.Summary["recall"])
+	}
+	if report.GenerationNote != "" {
+		t.Fatalf("没要求生成侧对比时不该有生成侧说明: %q", report.GenerationNote)
+	}
+}
+
+func TestComputeABRespectsMetricDirection(t *testing.T) {
+	// 幻觉率是"越低越好": 下降必须记改善(而不是恶化), 上升必须记恶化
+	score := 4.0
+	left := []ABCase{abJudged("q1", 1, 4, 3, &score), abJudged("q2", 1, 4, 0, &score)}
+	right := []ABCase{abJudged("q1", 1, 4, 0, &score), abJudged("q2", 1, 4, 2, &score)}
+
+	report := ComputeAB(left, right, ABOptions{IncludeGeneration: true})
+	hallucination := report.Summary["hallucination_rate"]
+
+	if hallucination.Improved != 1 || hallucination.Worsened != 1 {
+		t.Fatalf("一降一升: 应各记一次改善与恶化, 实际 %+v", hallucination)
+	}
+	if hallucination.HigherIsBetter {
+		t.Fatal("幻觉率必须标成越低越好, 否则前端会把下降涂成红色")
+	}
+	if report.Summary["claim_support_rate"].HigherIsBetter != true {
+		t.Fatal("断言支持率是越高越好")
+	}
+	if report.Summary["recall"].HigherIsBetter != true {
+		t.Fatal("检索指标都是越高越好")
+	}
+}

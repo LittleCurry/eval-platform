@@ -10,6 +10,24 @@ export const METRIC_LABELS: Record<string, string> = {
     reciprocal_rank: 'MRR@k',
     hit: 'Hit@k',
     precision: 'Precision@k',
+    claim_support_rate: '断言支持率',
+    hallucination_rate: '幻觉率',
+    irrelevant_rate: '无关断言率',
+    helpfulness: 'helpfulness 均值',
+    relevance: 'relevance 均值',
+}
+
+/** 生成侧指标(展示时单独分组, 并提示样本量更小)。 */
+export const GENERATION_METRICS = [
+    'claim_support_rate',
+    'hallucination_rate',
+    'irrelevant_rate',
+    'helpfulness',
+    'relevance',
+]
+
+export function isGenerationMetric(metric: string): boolean {
+    return GENERATION_METRICS.includes(metric)
 }
 
 export function metricLabel(metric: string): string {
@@ -26,11 +44,18 @@ export function formatDelta(delta: number | undefined, digits = 1): string {
 /**
  * 差值的三态配色: 落在噪声底内一律灰(不宣称变化) —— 这是 M5 最核心的展示纪律,
  * 否则用户会把跨 run 抖动当成"优化有效"。
+ *
+ * higherIsBetter=false(幻觉率/无关率)时方向要反过来: 下降才是好事、涂绿。
  */
-export function deltaTagType(delta: number | undefined, noiseFloor: number): TagType {
+export function deltaTagType(
+    delta: number | undefined,
+    noiseFloor: number,
+    higherIsBetter = true,
+): TagType {
     if (delta === undefined || Number.isNaN(delta)) return 'default'
     if (Math.abs(delta) <= noiseFloor) return 'default'
-    return delta > 0 ? 'success' : 'error'
+    const good = higherIsBetter ? delta > 0 : delta < 0
+    return good ? 'success' : 'error'
 }
 
 /** 标签迁移的人话: "检索漏召回(全未命中) → 干净"。 */
@@ -130,9 +155,10 @@ export function buildCompareMarkdown(report: ABReport): string {
     lines.push('', '## 指标', '', '| 指标 | 左 | 右 | 差值 | 改善 | 恶化 | p 值 | 结论 |', '|---|---|---|---|---|---|---|---|')
     for (const [metric, delta] of Object.entries(report.summary)) {
         const verdict = delta.below_noise ? '噪声内' : delta.significant ? '显著' : '不显著'
+        const direction = delta.higher_is_better ? '' : '（越低越好）'
         lines.push(
-            `| ${metricLabel(metric)} | ${delta.left} | ${delta.right} | ${formatDelta(delta.delta)} | `
-            + `${delta.improved} | ${delta.worsened} | ${delta.p_value} | ${verdict} |`,
+            `| ${metricLabel(metric)}${direction} | ${delta.left} | ${delta.right} | ${formatDelta(delta.delta)} | `
+            + `${delta.improved} | ${delta.worsened} | ${delta.p_value} | ${verdict}（${delta.cases} 题） |`,
         )
     }
 

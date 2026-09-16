@@ -17,7 +17,78 @@ import (
 // 60 题里 55 题都是满分), Wilcoxon 的正态近似在大量 ties 下并不可靠。所以结论以
 // "跨 run 噪声底(M3 实测: 中位 3e-4 / 最大 2.1e-3) + 翻转题清单"为准, p 值只用于旁证。
 
-// MetricsCompared M5-1 参与对比的逐题指标(与 worker 侧 CaseMetric 的字段名一致)。
+// MetricSpec 一个可对比指标: 怎么取值, 以及"这题在该指标上可比吗"。
+//
+// 为什么不是一串名字: 生成侧指标的前提是**两侧都有判定**——"左边没判定"绝不能被当成
+// "左边零幻觉"(M4-2 rubric v1 的老教训)。取值器返回 ok=false 就表示该题在该指标上
+// 不可比, 会被剔除出配对样本, 并把实际参与对比的题数报给前端。
+type MetricSpec struct {
+	Name string
+	// HigherIsBetter 指标方向: 幻觉率/无关率是**越低越好**, 报告与配色都要按方向判定,
+	// 否则"幻觉率下降"会被记成"恶化"并涂成红色。零值按"越高越好"处理。
+	HigherIsBetter bool
+	// Value 返回该题在该指标上的值; ok=false 表示不可比(缺判定/缺 rubric)。
+	Value func(ABCase) (float64, bool)
+}
+
+// RetrievalMetrics 检索侧指标(与 worker 侧 CaseMetric 字段名一致)。
+func RetrievalMetrics() []MetricSpec {
+	names := []string{"recall", "reciprocal_rank", "hit", "precision"}
+	specs := make([]MetricSpec, 0, len(names))
+	for _, name := range names {
+		metric := name
+		specs = append(specs, MetricSpec{
+			Name:           metric,
+			HigherIsBetter: true,
+			Value: func(item ABCase) (float64, bool) {
+				value, ok := item.Metrics[metric]
+				return value, ok
+			},
+		})
+	}
+	return specs
+}
+
+// GenerationMetrics 生成侧指标(M5-1 尾巴): 全部要求该题**确实有判定**。
+//
+// 三个率的分母是 claims_total: 没有断言(答案只说"资料里未提及")时率值无意义,
+// 因此这类题不进配对样本; helpfulness/relevance 要求该题打了 rubric。
+func GenerationMetrics() []MetricSpec {
+	// 三个率: 支持率越高越好, 幻觉率/无关率越低越好
+	rate := func(name string, higherIsBetter bool, pick func(ABJudge) int) MetricSpec {
+		return MetricSpec{
+			Name:           name,
+			HigherIsBetter: higherIsBetter,
+			Value: func(item ABCase) (float64, bool) {
+				if item.Judge == nil || item.Judge.Claims <= 0 {
+					return 0, false
+				}
+				return float64(pick(*item.Judge)) / float64(item.Judge.Claims), true
+			},
+		}
+	}
+	score := func(name string, pick func(ABJudge) float64) MetricSpec {
+		return MetricSpec{
+			Name:           name,
+			HigherIsBetter: true,
+			Value: func(item ABCase) (float64, bool) {
+				if item.Judge == nil || !item.Judge.HasRubric {
+					return 0, false
+				}
+				return pick(*item.Judge), true
+			},
+		}
+	}
+	return []MetricSpec{
+		rate("claim_support_rate", true, func(judge ABJudge) int { return judge.Supported }),
+		rate("hallucination_rate", false, func(judge ABJudge) int { return judge.Unsupported }),
+		rate("irrelevant_rate", false, func(judge ABJudge) int { return judge.Irrelevant }),
+		score("helpfulness", func(judge ABJudge) float64 { return judge.Helpfulness }),
+		score("relevance", func(judge ABJudge) float64 { return judge.Relevance }),
+	}
+}
+
+// MetricsCompared 兼容旧名: 只跑检索侧时的指标名列表。
 var MetricsCompared = []string{"recall", "reciprocal_rank", "hit", "precision"}
 
 // DefaultNoiseFloor 跨 run 分数噪声底(绝对值), 取自 M3 故障演练实测的最大偏差。
@@ -32,10 +103,23 @@ type ABOptions struct {
 	NoiseFloor float64
 	// Metrics 参与对比的指标名(空则用 MetricsCompared)。
 	Metrics []string
+	// IncludeGeneration 是否把生成侧指标(三率 + rubric 均值)一并对比。
+	IncludeGeneration bool
 	// LeftAttribution / RightAttribution: 该 run 的 flags 是否已由归因规则写过
 	// (即 runs.metrics.attribution 存在)。**只在一侧缺失时**才算问题 —— 见 ABReport.AttributionMissing。
 	LeftAttribution  bool
 	RightAttribution bool
+}
+
+// ABJudge 一道题判定结果的摘要(从 case_results.judge 抽出, 只留对比要用的计数与分数)。
+type ABJudge struct {
+	Claims      int
+	Supported   int
+	Unsupported int
+	Irrelevant  int
+	Relevance   float64
+	Helpfulness float64
+	HasRubric   bool
 }
 
 // ABCase 一次 run 里某道题参与对比的部分。
@@ -45,19 +129,26 @@ type ABCase struct {
 	Difficulty string
 	Metrics    map[string]float64
 	Flags      []string
+	// Judge 为 nil 表示这道题没有判定(只跑检索的 run, 或判定失败)。
+	Judge *ABJudge
 }
 
 // MetricDelta 单个指标的 A/B 差值。
 type MetricDelta struct {
-	Left        float64 `json:"left"`
-	Right       float64 `json:"right"`
-	Delta       float64 `json:"delta"`
-	Improved    int     `json:"improved"`
-	Worsened    int     `json:"worsened"`
-	Unchanged   int     `json:"unchanged"`
-	PValue      float64 `json:"p_value"`
-	Significant bool    `json:"significant"`
-	BelowNoise  bool    `json:"below_noise"`
+	Left      float64 `json:"left"`
+	Right     float64 `json:"right"`
+	Delta     float64 `json:"delta"`
+	Improved  int     `json:"improved"`
+	Worsened  int     `json:"worsened"`
+	Unchanged int     `json:"unchanged"`
+	// Cases 实际参与该指标对比的题数: 生成侧只统计两侧都有判定的题,
+	// 前端必须显示出来 —— 否则"幻觉率对比"基于 60 题还是 3 题没人知道。
+	Cases int `json:"cases"`
+	// HigherIsBetter 指标方向: false 时 delta 为负才是好事(幻觉率下降)。
+	HigherIsBetter bool    `json:"higher_is_better"`
+	PValue         float64 `json:"p_value"`
+	Significant    bool    `json:"significant"`
+	BelowNoise     bool    `json:"below_noise"`
 }
 
 // CaseDelta 一道题的标签变化(Fixed/Broke/Changed 用)。
@@ -100,6 +191,11 @@ type ABReport struct {
 	Fixed   []CaseDelta `json:"fixed"`
 	Broke   []CaseDelta `json:"broke"`
 	Changed []CaseDelta `json:"changed"`
+
+	// JudgedCases 两侧都有判定的题数(生成侧指标的配对样本量)。
+	JudgedCases int `json:"judged_cases"`
+	// GenerationNote 非空表示生成侧指标这次没得比(例如两侧都没有判定)。
+	GenerationNote string `json:"generation_note,omitempty"`
 
 	// AttributionMissing 非空表示标签层面的对比不可信(两侧归因准备度不一致)。
 	// 场景: A 做过归因(--apply)而 B 没做过 -> B 的 flags 是空的, 于是每一道有标签的题
@@ -165,8 +261,19 @@ func ComputeAB(left, right []ABCase, opts ABOptions) ABReport {
 		return report
 	}
 
-	for _, metric := range metrics {
-		report.Summary[metric] = compareMetric(sharedLeft, sharedRight, metric, opts.NoiseFloor)
+	specs := retrievalSpecs(metrics)
+	if opts.IncludeGeneration {
+		specs = append(specs, GenerationMetrics()...)
+	}
+	for _, spec := range specs {
+		report.Summary[spec.Name] = compareMetric(sharedLeft, sharedRight, spec, opts.NoiseFloor)
+	}
+	if opts.IncludeGeneration {
+		report.JudgedCases = judgedPairs(sharedLeft, sharedRight)
+		if report.JudgedCases == 0 {
+			report.GenerationNote = "两次 run 都没有可配对的判定结果(生成侧指标需要两侧都跑过 judge), " +
+				"所以这几个指标这次没有对比 —— 注意: 「没有判定」不等于「没有幻觉」。"
+		}
 	}
 
 	for index := range sharedLeft {
@@ -205,6 +312,33 @@ func attributionMismatch(opts ABOptions) string {
 	}
 }
 
+// retrievalSpecs 把指标名列表翻译成取值器; 名字不认识时跳过(旧调用方的兼容口)。
+func retrievalSpecs(names []string) []MetricSpec {
+	known := RetrievalMetrics()
+	byName := make(map[string]MetricSpec, len(known))
+	for _, spec := range known {
+		byName[spec.Name] = spec
+	}
+	out := make([]MetricSpec, 0, len(names))
+	for _, name := range names {
+		if spec, ok := byName[name]; ok {
+			out = append(out, spec)
+		}
+	}
+	return out
+}
+
+// judgedPairs 统计两侧都有判定的题数(生成侧指标的配对样本量)。
+func judgedPairs(left, right []ABCase) int {
+	count := 0
+	for index := range left {
+		if left[index].Judge != nil && right[index].Judge != nil {
+			count++
+		}
+	}
+	return count
+}
+
 func caseDelta(left, right ABCase) CaseDelta {
 	return CaseDelta{
 		QID:        left.QID,
@@ -232,33 +366,46 @@ func sameFlags(left, right []string) bool {
 }
 
 // compareMetric 单个指标的配对比较: 均值差 + 改善/恶化题数 + Wilcoxon p + 噪声底判定。
-func compareMetric(left, right []ABCase, metric string, noiseFloor float64) MetricDelta {
+//
+// 只有**两侧都给出有效值**的题才进配对样本: 这是生成侧指标必须守的那条线
+// (缺判定的题若按 0 参与, 就会把"没判定"读成"零幻觉")。
+func compareMetric(left, right []ABCase, spec MetricSpec, noiseFloor float64) MetricDelta {
 	delta := MetricDelta{}
 	diffs := make([]float64, 0, len(left))
 	for index := range left {
-		leftValue := left[index].Metrics[metric]
-		rightValue := right[index].Metrics[metric]
+		leftValue, leftOK := spec.Value(left[index])
+		rightValue, rightOK := spec.Value(right[index])
+		if !leftOK || !rightOK {
+			continue
+		}
 		diff := rightValue - leftValue
 		diffs = append(diffs, diff)
 		delta.Left += leftValue
 		delta.Right += rightValue
+		// 方向修正后再判定好坏: 幻觉率 -0.3 是改善, 不是恶化
+		improvement := diff
+		if !spec.HigherIsBetter {
+			improvement = -diff
+		}
 		switch {
 		// 判定"改善/恶化"的粒度是噪声底: 小于它只算"没变", 免得把抖动说成变化
-		case diff > noiseFloor:
+		case improvement > noiseFloor:
 			delta.Improved++
-		case diff < -noiseFloor:
+		case improvement < -noiseFloor:
 			delta.Worsened++
 		default:
 			delta.Unchanged++
 		}
 	}
-	count := float64(len(left))
+	count := float64(len(diffs))
+	delta.Cases = len(diffs)
 	if count > 0 {
 		delta.Left = round(delta.Left/count, 6)
 		delta.Right = round(delta.Right/count, 6)
 	}
 	delta.Delta = round(delta.Right-delta.Left, 6)
 	delta.BelowNoise = math.Abs(delta.Delta) <= noiseFloor
+	delta.HigherIsBetter = spec.HigherIsBetter
 
 	_, pValue, ok := WilcoxonSignedRank(diffs)
 	if ok {

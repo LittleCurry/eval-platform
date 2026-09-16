@@ -207,6 +207,10 @@ export interface ABMetricDelta {
     significant: boolean
     /** 差值落在跨 run 噪声底内: 展示层必须显示"无法区分", 不许说变好/变坏。 */
     below_noise: boolean
+    /** 实际参与该指标对比的题数(生成侧只统计两侧都有判定的题)。 */
+    cases: number
+    /** 指标方向: false 表示越低越好(幻觉率/无关率), 配色要反着来。 */
+    higher_is_better: boolean
 }
 
 export interface ABCaseDelta {
@@ -246,6 +250,10 @@ export interface ABReport {
     by_flag: ABStratum[]
     /** 非空表示两侧归因准备度不一致, 标签层面对比不可信。 */
     attribution_missing?: string
+    /** 两侧都有判定的题数(生成侧指标的配对样本量)。 */
+    judged_cases: number
+    /** 非空表示生成侧指标这次没得比(例如两侧都没有判定)。 */
+    generation_note?: string
 }
 
 // ---- 任务进度(jobs) ----

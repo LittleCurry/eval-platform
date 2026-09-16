@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
@@ -17,14 +17,15 @@ import {
   NList,
   NListItem,
   NProgress,
+  NSelect,
   NSpace,
   NStatistic,
   NSwitch,
   NTag,
   NText,
 } from 'naive-ui'
-import { getCaseContext, getRunCaseResults, getRunProgress, getRunReport } from '../api/runs'
-import type { CaseContextResponse, RunCaseResult, RunProgress, RunReport } from '../api/types'
+import { getCaseContext, getRunCaseResults, getRunProgress, getRunReport, listRuns } from '../api/runs'
+import type { CaseContextResponse, Run, RunCaseResult, RunProgress, RunReport } from '../api/types'
 import {
   difficultyTagType,
   formatDateTime,
@@ -56,8 +57,12 @@ import {
 } from '../utils/report'
 
 const route = useRoute()
+const router = useRouter()
 const message = useMessage()
 const runId = computed(() => Number(route.params.id))
+// M5-1: "和哪次 run 对比" —— 同评测集的 run 优先, 免得选到不可比的组合
+const allRuns = ref<Run[]>([])
+const compareTarget = ref<number | null>(null)
 
 const report = ref<RunReport | null>(null)
 const progressInfo = ref<RunProgress | null>(null)
@@ -91,12 +96,44 @@ async function loadProgress() {
   progressInfo.value = await getRunProgress(runId.value)
 }
 
+async function loadRunsForCompare() {
+  try {
+    allRuns.value = await listRuns({ limit: 200 })
+  } catch {
+    // 对比入口是锦上添花: 拉不到 run 列表就不显示下拉, 不影响报告主体
+  }
+}
+
+/** 对比候选: 排除自己; 同评测集的排前面(跨集会直接判不可比, 先帮用户避开)。 */
+const compareOptions = computed(() => {
+  const self = report.value?.run
+  const others = allRuns.value.filter((run) => run.id !== runId.value)
+  const sameDataset = others.filter((run) => !self || run.dataset_id === self.dataset_id)
+  const rest = others.filter((run) => self && run.dataset_id !== self.dataset_id)
+  return [
+    ...sameDataset.map((run) => ({
+      label: `#${run.id} · 同集 · ${shortHash(run.config_hash)} · ${statusLabel(run.status)}`,
+      value: run.id,
+    })),
+    ...rest.map((run) => ({
+      label: `#${run.id} · dataset ${run.dataset_id} · ${shortHash(run.config_hash)}`,
+      value: run.id,
+    })),
+  ]
+})
+
+function openCompare(target: number | null) {
+  if (!target) return
+  // 当前 run 作为基准(左), 选中的作为对照(右)
+  router.push({ path: '/compare', query: { left: String(runId.value), right: String(target) } })
+}
+
 async function loadAll() {
   loading.value = true
   errorText.value = ''
   try {
     report.value = await getRunReport(runId.value, 10)
-    await Promise.all([loadCases(), loadProgress()])
+    await Promise.all([loadCases(), loadProgress(), loadRunsForCompare()])
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -420,9 +457,21 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
 
     <NCard :title="report ? `运行报告 · run #${report.run.id}` : '运行报告'" style="margin-bottom: 16px">
       <template #header-extra>
-        <NTag :type="statusTagType(report?.run.status)">
-          {{ statusLabel(report?.run.status) }}
-        </NTag>
+        <NSpace align="center" :size="8">
+          <NSelect
+              v-if="compareOptions.length"
+              :value="compareTarget"
+              :options="compareOptions"
+              filterable
+              size="small"
+              placeholder="和哪次 run 对比？"
+              style="width: 260px"
+              @update:value="openCompare"
+          />
+          <NTag :type="statusTagType(report?.run.status)">
+            {{ statusLabel(report?.run.status) }}
+          </NTag>
+        </NSpace>
       </template>
 
       <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">

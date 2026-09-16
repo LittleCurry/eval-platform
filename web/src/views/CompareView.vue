@@ -3,6 +3,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
+import type { TagType } from '../utils/format'
 import {
   NAlert,
   NButton,
@@ -27,6 +28,7 @@ import {
   exportFilename,
   formatDelta,
   flagTransitionText,
+  isGenerationMetric,
   metricLabel,
   stratumFlagShift,
 } from '../utils/compare'
@@ -97,7 +99,11 @@ onMounted(async () => {
 
 const summaryRows = computed(() => {
   const source = report.value?.summary ?? {}
-  return Object.entries(source).map(([metric, delta]) => ({ metric, ...delta }))
+  return Object.entries(source).map(([metric, delta]) => ({
+    metric,
+    generation: isGenerationMetric(metric),
+    ...delta,
+  }))
 })
 
 const noiseFloor = computed(() => report.value?.noise_floor ?? 0)
@@ -130,19 +136,44 @@ function exportJson() {
       JSON.stringify(report.value, null, 2), 'application/json')
 }
 
+/** 方向感知的配色: 幻觉率下降要涂绿, 不能被当成"恶化"。 */
+function metricTagType(row: { delta: number; higher_is_better: boolean }): TagType {
+  return deltaTagType(row.delta, noiseFloor.value, row.higher_is_better !== false)
+}
+
 const summaryColumns: DataTableColumns<(typeof summaryRows.value)[number]> = [
-  { title: '指标', key: 'metric', width: 120, render: (row) => metricLabel(row.metric) },
+  {
+    title: '指标',
+    key: 'metric',
+    width: 170,
+    render: (row) =>
+        h(NSpace, { size: 4, align: 'center' }, {
+          default: () => [
+            h('span', {}, metricLabel(row.metric)),
+            row.higher_is_better === false
+                ? h(NTag, { size: 'tiny', bordered: false }, { default: () => '越低越好' })
+                : null,
+            row.generation ? h(NTag, { size: 'tiny', type: 'info', bordered: false }, { default: () => '生成侧' }) : null,
+          ],
+        }),
+  },
   { title: '左(基准)', key: 'left', width: 110, render: (row) => formatPercent(row.left) },
   { title: '右(对照)', key: 'right', width: 110, render: (row) => formatPercent(row.right) },
   {
     title: '差值',
     key: 'delta',
     width: 120,
-    render: (row) => h(NTag, { size: 'small', type: deltaTagType(row.delta, noiseFloor.value) },
-        { default: () => formatDelta(row.delta) }),
+    render: (row) => h(NTag, { size: 'small', type: metricTagType(row) }, { default: () => formatDelta(row.delta) }),
   },
   { title: '改善', key: 'improved', width: 80 },
   { title: '恶化', key: 'worsened', width: 80 },
+  {
+    // 生成侧只在"两侧都有判定"的题上比 -> 样本量必须露出来
+    title: '题数',
+    key: 'cases',
+    width: 80,
+    render: (row) => h(NText, { depth: row.generation ? 2 : 3 }, { default: () => String(row.cases ?? 0) }),
+  },
   { title: 'p 值', key: 'p_value', width: 100, render: (row) => (row.p_value ?? 0).toFixed(4) },
   {
     title: '结论',
@@ -151,8 +182,7 @@ const summaryColumns: DataTableColumns<(typeof summaryRows.value)[number]> = [
         row.below_noise
             ? h(NText, { depth: 3 }, { default: () => '落在噪声内, 无法区分' })
             : row.significant
-                ? h(NTag, { size: 'small', type: deltaTagType(row.delta, noiseFloor.value) },
-                    { default: () => '显著' })
+                ? h(NTag, { size: 'small', type: metricTagType(row) }, { default: () => '显著' })
                 : h(NText, { depth: 3 }, { default: () => '不显著' }),
   },
 ]
@@ -230,6 +260,9 @@ function stratumColumns(): DataTableColumns<ABStratum> {
       </NAlert>
       <NAlert v-if="report?.attribution_missing" type="warning" :show-icon="false" style="margin-top: 12px">
         {{ report.attribution_missing }}
+      </NAlert>
+      <NAlert v-if="report?.generation_note" type="info" :show-icon="false" style="margin-top: 12px">
+        {{ report.generation_note }}
       </NAlert>
     </NCard>
 

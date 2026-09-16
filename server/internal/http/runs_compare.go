@@ -101,8 +101,9 @@ func (h *compareHandler) Compare(c *gin.Context) {
 	}
 
 	report := eval.ComputeAB(toABCases(leftCases), toABCases(rightCases), eval.ABOptions{
-		LeftAttribution:  hasAttribution(leftRun),
-		RightAttribution: hasAttribution(rightRun),
+		LeftAttribution:   hasAttribution(leftRun),
+		RightAttribution:  hasAttribution(rightRun),
+		IncludeGeneration: true,
 	})
 	report.Left = leftID
 	report.Right = rightID
@@ -133,9 +134,44 @@ func toABCases(rows []store.RunCaseResult) []eval.ABCase {
 			Difficulty: row.Difficulty,
 			Metrics:    metrics,
 			Flags:      row.Flags,
+			Judge:      judgeSummary(row.Judge),
 		})
 	}
 	return out
+}
+
+// judgeSummary 从 case_results.judge 里抽出对比要用的计数与分数。
+// 判定缺失(只跑检索的 run)返回 nil —— 生成侧指标会因此把这题排除在配对样本外。
+func judgeSummary(judge map[string]any) *eval.ABJudge {
+	if len(judge) == 0 {
+		return nil
+	}
+	claims, ok := judge["claims"].([]any)
+	if !ok && judge["rubric"] == nil {
+		return nil
+	}
+	summary := &eval.ABJudge{}
+	for _, raw := range claims {
+		claim, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		summary.Claims++
+		switch label, _ := claim["label"].(string); label {
+		case "supported":
+			summary.Supported++
+		case "unsupported":
+			summary.Unsupported++
+		case "irrelevant":
+			summary.Irrelevant++
+		}
+	}
+	if rubric, ok := judge["rubric"].(map[string]any); ok && rubric != nil {
+		summary.HasRubric = true
+		summary.Relevance = floatField(rubric, "relevance")
+		summary.Helpfulness = floatField(rubric, "helpfulness")
+	}
+	return summary
 }
 
 // floatField 读 jsonb 解出来的数值字段(jsonb 里都是 float64, 但历史数据可能是整数)。
