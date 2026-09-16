@@ -193,6 +193,61 @@ export interface CaseContextResponse {
     error?: string
 }
 
+// ---- A/B 对比(M5-1, process.md D6/D18) ----
+
+export interface ABMetricDelta {
+    left: number
+    right: number
+    delta: number
+    improved: number
+    worsened: number
+    unchanged: number
+    p_value: number
+    /** 统计显著 **且** 差值超出噪声底 —— 两个条件缺一不可。 */
+    significant: boolean
+    /** 差值落在跨 run 噪声底内: 展示层必须显示"无法区分", 不许说变好/变坏。 */
+    below_noise: boolean
+}
+
+export interface ABCaseDelta {
+    qid: string
+    category?: string
+    difficulty?: string
+    flags_left: string[]
+    flags_right: string[]
+}
+
+export interface ABStratum {
+    key: string
+    cases: number
+    mean_delta: number
+    improved: number
+    worsened: number
+    flagged_left: number
+    flagged_right: number
+}
+
+export interface ABReport {
+    left: number
+    right: number
+    /** false 时下面的统计没有意义, reason 说明原因。 */
+    comparable: boolean
+    reason?: string
+    left_cases: number
+    right_cases: number
+    shared_cases: number
+    summary: Record<string, ABMetricDelta>
+    noise_floor: number
+    fixed: ABCaseDelta[]
+    broke: ABCaseDelta[]
+    changed: ABCaseDelta[]
+    by_category: ABStratum[]
+    by_difficulty: ABStratum[]
+    by_flag: ABStratum[]
+    /** 非空表示两侧归因准备度不一致, 标签层面对比不可信。 */
+    attribution_missing?: string
+}
+
 // ---- 任务进度(jobs) ----
 
 export interface JobProgress {

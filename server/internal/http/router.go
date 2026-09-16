@@ -41,6 +41,7 @@ func NewRouter(d Deps) *gin.Engine {
 	cases := newCaseHandler(d.Cases)
 	runs := newRunHandler(d.Runs, d.EvalEmbedding, d.EvalGeneration, d.EvalJudge)
 	runContext := newRunContextHandler(d.Runs, d.QdrantPoints)
+	compare := newCompareHandler(d.Runs)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)
@@ -70,5 +71,7 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.GET("/runs/:id/report", runs.Report)
 	v1.GET("/runs/:id/progress", runs.Progress)
 	v1.GET("/runs/:id/cases/:case_id/context", runContext.CaseContext)
+	// M5-1: A/B 对比(主语是"两次 run", 所以放在顶层, 也避开 /runs/:id 的路由树)
+	v1.GET("/compare", compare.Compare)
 	return r
 }

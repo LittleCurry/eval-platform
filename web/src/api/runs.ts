@@ -1,5 +1,12 @@
 import { http } from './client'
-import type { CaseContextResponse, Run, RunCaseResult, RunProgress, RunReport } from './types'
+import type {
+    ABReport,
+    CaseContextResponse,
+    Run,
+    RunCaseResult,
+    RunProgress,
+    RunReport,
+} from './types'
 
 export interface ListRunsParams {
     datasetId?: number
@@ -47,4 +54,9 @@ export function getRunProgress(id: number): Promise<RunProgress> {
  */
 export function getCaseContext(runId: number, caseId: number): Promise<CaseContextResponse> {
     return http.get(`/runs/${runId}/cases/${caseId}/context`)
+}
+
+/** 两次 run 的 A/B 对比(M5-1): 逐题差值 + 显著性 + 翻转题清单 + 分层。 */
+export function getRunCompare(left: number, right: number): Promise<ABReport> {
+    return http.get(`/compare?left=${left}&right=${right}`)
 }

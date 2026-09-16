@@ -42,6 +42,12 @@ export const routes: RouteRecordRaw[] = [
                 component: () => import('../views/RunReportView.vue'),
                 meta: { title: '运行详情' },
             },
+            {
+                path: 'compare',
+                name: 'compare',
+                component: () => import('../views/CompareView.vue'),
+                meta: { title: 'A/B 对比' },
+            },
         ],
     },
     {

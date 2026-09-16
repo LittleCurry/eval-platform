@@ -169,6 +169,7 @@ const columns: DataTableColumns<Run> = [
   <NCard title="评测运行">
     <template #header-extra>
       <NSpace align="center">
+        <NButton size="small" @click="router.push('/compare')">A/B 对比</NButton>
         <NTag v-if="hasActiveRun && autoRefresh" size="small" type="info">自动刷新中</NTag>
         <NSpace align="center" :size="4">
           <NText depth="3" style="font-size: 12px">自动刷新</NText>
