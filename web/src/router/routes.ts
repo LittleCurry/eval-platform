@@ -55,6 +55,24 @@ export const routes: RouteRecordRaw[] = [
                 meta: { title: '标注工作台' },
             },
             {
+                path: 'gold',
+                name: 'gold',
+                component: () => import('../views/HumanGoldView.vue'),
+                meta: { title: '人工金标打分' },
+            },
+            {
+                path: 'calibration',
+                name: 'calibration',
+                component: () => import('../views/CalibrationView.vue'),
+                meta: { title: 'Judge 校准' },
+            },
+            {
+                path: 'closure',
+                name: 'closure',
+                component: () => import('../views/ClosureView.vue'),
+                meta: { title: '标注闭环' },
+            },
+            {
                 path: 'compare',
                 name: 'compare',
                 component: () => import('../views/CompareView.vue'),

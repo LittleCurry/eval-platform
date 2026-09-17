@@ -355,6 +355,150 @@ export interface AnnotationSuggestion {
 }
 
 
+// ---- 人工金标与 judge 校准(M6-3) ----
+
+/** 三值判定: "看不清"必须能表达 —— 逼标注员二选一, κ 会被瞎猜污染。 */
+export type GoldVerdict = 'faithful' | 'hallucinated' | 'unclear'
+
+export interface HumanGoldScore {
+    id: number
+    project_id: number
+    run_id: number
+    case_id: number
+    /** 谁判的。进唯一键: 同一题允许两个人各打一份(人工间一致性要用)。 */
+    annotator: string
+    verdict: GoldVerdict
+    /** null = 这题没打分(只判幻觉是合法用法), 不是 0 分。 */
+    relevance?: number | null
+    helpfulness?: number | null
+    note: string
+    reviewed: boolean
+    created_at: string
+    updated_at: string
+}
+
+/** 幻觉检测的二分类校准(混淆矩阵 + 一致率 + κ)。 */
+export interface GoldBinaryCalibration {
+    pairs: number
+    judge_positive: number
+    human_positive: number
+    true_positive: number
+    false_positive: number
+    true_negative: number
+    false_negative: number
+    agreement: number
+    /** κ 已扣掉"瞎猜也能对"的部分: 常数分类器一致率再高, κ 也是 0。 */
+    kappa: number
+    /** 人工判"看不清"而没进样本的题数。 */
+    excluded_unclear: number
+}
+
+/** 有序分数(1–5)的校准。 */
+export interface GoldScoreCalibration {
+    pairs: number
+    exact_agreement: number
+    within_1: number
+    mae: number
+    judge_mean: number
+    human_mean: number
+    /** judge - 人工: 正数 = judge 更宽松。 */
+    bias: number
+    /** 5×5, 行 = 人工, 列 = judge(下标 0 表示 1 分)。 */
+    confusion: number[][]
+}
+
+export interface GoldInterAnnotator {
+    annotators_a: string
+    annotators_b: string
+    binary_pairs: number
+    binary_kappa?: number
+    score_pairs: number
+    score_mae?: number
+    score_exact_rate?: number
+}
+
+export interface JudgeCalibration {
+    run_id: number
+    total_cases: number
+    cases_with_gold: number
+    primary_annotator: string
+    annotators: string[]
+    binary?: GoldBinaryCalibration
+    helpfulness?: GoldScoreCalibration
+    relevance?: GoldScoreCalibration
+    inter_annotator?: GoldInterAnnotator
+    coverage: number
+    gold_judged: number
+    gold_unjudged: number
+    /** 报告自曝的"别信我"条件(样本<20 / 单人 / 覆盖率低)。 */
+    notes: string[]
+}
+
+// ---- 标注闭环(M6-4) ----
+
+export type ClosureVerdict = 'improved' | 'stable' | 'worsened' | 'changed' | 'unverifiable'
+
+export interface ClosureEvidence {
+    metric: string
+    left: number
+    right: number
+    delta: number
+    higher_is_better: boolean
+    direction: 'better' | 'worse' | 'same'
+    /** false = 某一侧不可比(例如缺判定), 数值无意义, 显示 "—"。 */
+    comparable: boolean
+}
+
+export interface ClosureRecord {
+    /** 标注 id: 销单(PATCH /annotations/:id)要用。 */
+    annotation_id: number
+    case_id: number
+    qid: string
+    question?: string
+    status: AnnotationStatus
+    reason: string
+    comment: string
+    assignee: string
+    verdict: ClosureVerdict
+    flags_left: string[] | null
+    flags_right: string[] | null
+    evidence: ClosureEvidence[]
+    /** 状态是 fixed 且这次确实变好 —— 可以推进到 verified。 */
+    eligible_for_verify: boolean
+    /** 不能销单的原因(没变好 / 状态还是 open / 这次 run 里没这道题)。 */
+    blocked_reason?: string
+}
+
+export interface ClosureSummary {
+    annotated: number
+    improved: number
+    stable: number
+    worsened: number
+    changed: number
+    unverifiable: number
+    by_status: Record<string, number>
+    eligible_for_verify: number
+    fixed_total: number
+}
+
+export interface ClosureReport {
+    /** 打标注的那次 run(待办所在)。 */
+    baseline: number
+    /** 改完之后的新 run。 */
+    candidate: number
+    comparable: boolean
+    reason?: string
+    baseline_hash: string
+    candidate_hash: string
+    /** true = 两次配置指纹相同: 这是复现不是实验。 */
+    same_config: boolean
+    attribution_missing?: string
+    summary: ClosureSummary
+    records: ClosureRecord[]
+    notes: string[]
+}
+
+
 // ---- 任务进度(jobs) ----
 
 export interface JobProgress {

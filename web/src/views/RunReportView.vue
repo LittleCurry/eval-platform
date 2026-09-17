@@ -476,6 +476,23 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
           >
             去标注这 {{ flagEntries.reduce((sum, [, count]) => sum + count, 0) }} 条标签
           </NButton>
+          <!-- M6-3: 只有真判过的 run 才谈得上校准 judge -->
+          <NButton
+              v-if="Number(report?.metrics?.cases_judged ?? 0) > 0"
+              size="small"
+              quaternary
+              @click="router.push({ path: '/calibration', query: { run: String(runId) } })"
+          >
+            校准 judge（{{ report?.metrics?.cases_judged }} 题有判定）
+          </NButton>
+          <!-- M6-4: 闭环的基线就是当前这次 run(标注挂在它上面) -->
+          <NButton
+              size="small"
+              quaternary
+              @click="router.push({ path: '/closure', query: { baseline: String(runId) } })"
+          >
+            看标注闭环
+          </NButton>
           <NTag :type="statusTagType(report?.run.status)">
             {{ statusLabel(report?.run.status) }}
           </NTag>

@@ -19,6 +19,9 @@ const menuOptions: MenuOption[] = [
   { label: '数据集', key: 'datasets' },
   { label: '运行报告', key: 'runs' },
   { label: '标注工作台', key: 'annotations' },
+  { label: '金标打分', key: 'gold' },
+  { label: 'Judge 校准', key: 'calibration' },
+  { label: '标注闭环', key: 'closure' },
   { label: '配置模板', key: 'profiles' },
   { label: 'A/B 对比', key: 'compare' },
 ]
