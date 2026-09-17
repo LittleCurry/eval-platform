@@ -48,6 +48,7 @@ func NewRouter(d Deps) *gin.Engine {
 	profiles := newPipelineProfileHandler(d.Profiles, d.EvalEmbedding, d.EvalGeneration, d.EvalJudge)
 	annotations := newAnnotationHandler(d.Annotations, d.Runs)
 	gold := newHumanGoldHandler(d.HumanGold, d.Runs)
+	closure := newClosureHandler(d.Runs, d.Annotations)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)
@@ -103,5 +104,8 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.PATCH("/human-gold/:id", gold.Update)
 	v1.DELETE("/human-gold/:id", gold.Delete)
 	v1.GET("/judge-calibration", gold.Calibration)
+	// M6-4: 标注闭环(标成 fixed 的题在新 run 里真的好没好吗)
+	//   baseline = 打标注的那次 run, candidate = 改完之后的新 run; 方向反了结论就反了
+	v1.GET("/closure", closure.Closure)
 	return r
 }

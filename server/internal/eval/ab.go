@@ -278,14 +278,12 @@ func ComputeAB(left, right []ABCase, opts ABOptions) ABReport {
 
 	for index := range sharedLeft {
 		leftCase, rightCase := sharedLeft[index], sharedRight[index]
-		leftFlagged := len(leftCase.Flags) > 0
-		rightFlagged := len(rightCase.Flags) > 0
-		switch {
-		case leftFlagged && !rightFlagged:
+		switch FlagTransition(leftCase.Flags, rightCase.Flags) {
+		case TransitionFixed:
 			report.Fixed = append(report.Fixed, caseDelta(leftCase, rightCase))
-		case !leftFlagged && rightFlagged:
+		case TransitionBroke:
 			report.Broke = append(report.Broke, caseDelta(leftCase, rightCase))
-		case leftFlagged && rightFlagged && !sameFlags(leftCase.Flags, rightCase.Flags):
+		case TransitionChanged:
 			report.Changed = append(report.Changed, caseDelta(leftCase, rightCase))
 		}
 	}
@@ -346,6 +344,38 @@ func caseDelta(left, right ABCase) CaseDelta {
 		Difficulty: left.Difficulty,
 		FlagsLeft:  append([]string{}, left.Flags...),
 		FlagsRight: append([]string{}, right.Flags...),
+	}
+}
+
+// 标签转移类型(A/B 与 M6 闭环共用一份定义)。
+//
+// 为什么必须共用: "变好了"这件事只能有一个定义。闭环页要把"已标 fixed 的题"
+// 推进到 verified, 如果它自己再写一遍判定, 就会出现"对比页说修好了、闭环页说没修好"
+// 这种最伤信任的分歧。
+const (
+	TransitionStable  = "stable"  // 两侧标签相同(含都干净 / 都坏且标签一致)
+	TransitionFixed   = "fixed"   // 左有问题 -> 右干净
+	TransitionBroke   = "broke"   // 左干净 -> 右有问题
+	TransitionChanged = "changed" // 两侧都有问题但标签集不同(换了主因, 不算修好)
+)
+
+// FlagTransition 按标签判断这道题在两次 run 之间发生了什么。
+//
+// 口径说明: 这里只认"有没有标签 / 标签是否相同", 不看指标数值 ——
+// 指标差值另作证据展示(闭环页会并排列出), 但**结论**挂在标签上,
+// 因为标签是规则在完整上下文(有无 gold、是否有判定)下给出的判断, 比单看某个数稳。
+func FlagTransition(left, right []string) string {
+	leftFlagged := len(left) > 0
+	rightFlagged := len(right) > 0
+	switch {
+	case leftFlagged && !rightFlagged:
+		return TransitionFixed
+	case !leftFlagged && rightFlagged:
+		return TransitionBroke
+	case leftFlagged && rightFlagged && !sameFlags(left, right):
+		return TransitionChanged
+	default:
+		return TransitionStable
 	}
 }
 
