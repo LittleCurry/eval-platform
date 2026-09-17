@@ -43,6 +43,12 @@ export const routes: RouteRecordRaw[] = [
                 meta: { title: '运行详情' },
             },
             {
+                path: 'profiles',
+                name: 'profiles',
+                component: () => import('../views/PipelineProfilesView.vue'),
+                meta: { title: '配置模板' },
+            },
+            {
                 path: 'compare',
                 name: 'compare',
                 component: () => import('../views/CompareView.vue'),

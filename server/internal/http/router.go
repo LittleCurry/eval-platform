@@ -18,6 +18,7 @@ type Deps struct {
 	Cases          CaseStore
 	Runs           RunStore
 	QdrantPoints   QdrantPointStore
+	Profiles       PipelineProfileStore
 	EvalEmbedding  eval.EmbeddingConfig
 	EvalGeneration eval.GenerationConfig
 	EvalJudge      eval.JudgeConfig
@@ -42,6 +43,7 @@ func NewRouter(d Deps) *gin.Engine {
 	runs := newRunHandler(d.Runs, d.EvalEmbedding, d.EvalGeneration, d.EvalJudge)
 	runContext := newRunContextHandler(d.Runs, d.QdrantPoints)
 	compare := newCompareHandler(d.Runs)
+	profiles := newPipelineProfileHandler(d.Profiles, d.EvalEmbedding, d.EvalGeneration, d.EvalJudge)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)
@@ -73,5 +75,13 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.GET("/runs/:id/cases/:case_id/context", runContext.CaseContext)
 	// M5-1: A/B 对比(主语是"两次 run", 所以放在顶层, 也避开 /runs/:id 的路由树)
 	v1.GET("/compare", compare.Compare)
+	// M5-2: 配置模板 CRUD + 提交前预览指纹
+	//   预览放顶层 /pipeline-preview: gin 同一层不允许静态段与 :id 通配段共存(会 panic)
+	v1.GET("/pipeline-profiles", profiles.List)
+	v1.POST("/pipeline-profiles", profiles.Create)
+	v1.GET("/pipeline-profiles/:id", profiles.Get)
+	v1.PATCH("/pipeline-profiles/:id", profiles.Update)
+	v1.DELETE("/pipeline-profiles/:id", profiles.Delete)
+	v1.POST("/pipeline-preview", profiles.Preview)
 	return r
 }

@@ -203,6 +203,42 @@ func chunkingOf(snapshot map[string]any) (eval.ChunkingConfig, error) {
 	return cfg, nil
 }
 
+// stringField 读字符串字段(缺省/类型不符时用默认值)。
+func stringField(source map[string]any, key, def string) string {
+	if value, ok := source[key].(string); ok {
+		return value
+	}
+	return def
+}
+
+// floatFieldOK / intFieldOK / boolFieldOK 区分"字段不存在"与"显式传了零值" ——
+// 配置模板要保留用户显式写的 0/false(例如 temperature=0、enable_rubric=false)。
+func floatFieldOK(source map[string]any, key string) (float64, bool) {
+	switch value := source[key].(type) {
+	case float64:
+		return value, true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func intFieldOK(source map[string]any, key string) (int, bool) {
+	value, ok := floatFieldOK(source, key)
+	if !ok {
+		return 0, false
+	}
+	return int(value), true
+}
+
+func boolFieldOK(source map[string]any, key string) (bool, bool) {
+	value, ok := source[key].(bool)
+	return value, ok
+}
+
 // intField 读 jsonb 里的数字字段(jsonb 解出来是 float64)。
 func intField(section map[string]any, key string, def int) int {
 	switch value := section[key].(type) {

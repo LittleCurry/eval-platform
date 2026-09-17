@@ -218,77 +218,14 @@ type submitRunReq struct {
 
 // resolveGeneration 把请求里的生成配置与服务端默认值合并并校验; 未启用时返回 nil。
 func (h *runHandler) resolveGeneration(req *submitRunGeneration) (*eval.GenerationConfig, error) {
-	if req == nil {
-		return nil, nil
-	}
-	config := h.generation // 服务端默认(来自 GENERATION_* 环境变量)
-	if value := strings.TrimSpace(req.Provider); value != "" {
-		config.Provider = value
-	}
-	if value := strings.TrimSpace(req.BaseURL); value != "" {
-		config.BaseURL = value
-	}
-	if value := strings.TrimSpace(req.Model); value != "" {
-		config.Model = value
-	}
-	if value := strings.TrimSpace(req.PromptID); value != "" {
-		config.PromptID = value
-	}
-	if req.Temperature != nil {
-		config.Temperature = *req.Temperature
-	}
-	if req.MaxTokens != nil {
-		config.MaxTokens = *req.MaxTokens
-	}
-	if req.MaxContextChars != nil {
-		config.MaxContextChars = *req.MaxContextChars
-	}
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-	return &config, nil
+	// 解析规则在 submit_config.go, 与配置模板预览共用同一套(M5-2)
+	return resolveGenerationRequest(req, h.generation)
 }
 
 // resolveJudge 把请求里的判定配置与服务端默认值合并并校验; 未启用时返回 nil。
 func (h *runHandler) resolveJudge(req *submitRunJudge) (*eval.JudgeConfig, error) {
-	if req == nil {
-		return nil, nil
-	}
-	config := h.judge // 服务端默认(来自 JUDGE_* 环境变量)
-	if value := strings.TrimSpace(req.Provider); value != "" {
-		config.Provider = value
-	}
-	if value := strings.TrimSpace(req.BaseURL); value != "" {
-		config.BaseURL = value
-	}
-	if value := strings.TrimSpace(req.Model); value != "" {
-		config.Model = value
-	}
-	if value := strings.TrimSpace(req.ClaimsPromptID); value != "" {
-		config.ClaimsPromptID = value
-	}
-	if value := strings.TrimSpace(req.RubricPromptID); value != "" {
-		config.RubricPromptID = value
-	}
-	if req.Temperature != nil {
-		config.Temperature = *req.Temperature
-	}
-	if req.MaxTokens != nil {
-		config.MaxTokens = *req.MaxTokens
-	}
-	if req.MaxContextChars != nil {
-		config.MaxContextChars = *req.MaxContextChars
-	}
-	if req.EnableRubric != nil {
-		config.EnableRubric = *req.EnableRubric
-	}
-	if req.MaxClaims != nil {
-		config.MaxClaims = *req.MaxClaims
-	}
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-	return &config, nil
+	// 解析规则在 submit_config.go, 与配置模板预览共用同一套(M5-2)
+	return resolveJudgeRequest(req, h.judge)
 }
 
 // Submit POST /runs
@@ -308,24 +245,17 @@ func (h *runHandler) Submit(c *gin.Context) {
 		writeErr(c, http.StatusBadRequest, "corpus_id 必填且为正整数")
 		return
 	}
-	if req.TopK <= 0 {
-		req.TopK = 5
-	}
-	if req.TopK > 50 {
-		writeErr(c, http.StatusBadRequest, "top_k 过大(上限 50)")
+
+	topK, err := resolveTopK(req.TopK)
+	if err != nil {
+		writeErr(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	req.TopK = topK
 
-	chunking := eval.DefaultChunking()
-	if req.Chunking != nil {
-		chunking = eval.ChunkingConfig{
-			Strategy:  req.Chunking.Strategy,
-			ChunkSize: req.Chunking.ChunkSize,
-			Overlap:   req.Chunking.Overlap,
-			MinChars:  req.Chunking.MinChars,
-		}
-	}
-	if err := chunking.Validate(); err != nil {
+	// 切分/生成的解析规则都在 submit_config.go, 与配置模板预览共用(M5-2)
+	chunking, err := resolveChunkingRequest(req.Chunking)
+	if err != nil {
 		writeErr(c, http.StatusBadRequest, err.Error())
 		return
 	}

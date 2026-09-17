@@ -193,6 +193,70 @@ export interface CaseContextResponse {
     error?: string
 }
 
+// ---- 配置模板(M5-2) ----
+
+export interface ProfileChunking {
+    strategy: string
+    chunk_size: number
+    overlap: number
+    min_chars: number
+}
+
+export interface ProfileRetrieval {
+    top_k: number
+}
+
+export interface ProfileGeneration {
+    provider?: string
+    base_url?: string
+    model?: string
+    prompt_id?: string
+    temperature?: number
+    max_tokens?: number
+    max_context_chars?: number
+}
+
+export interface ProfileJudge {
+    provider?: string
+    base_url?: string
+    model?: string
+    claims_prompt_id?: string
+    rubric_prompt_id?: string
+    temperature?: number
+    max_tokens?: number
+    max_context_chars?: number
+    enable_rubric?: boolean
+    max_claims?: number
+}
+
+/** 模板配置: 与 POST /runs 的旋钮一一对应; generation/judge 为 null 表示该阶段不启用。 */
+export interface PipelineProfileConfig {
+    chunking: ProfileChunking
+    retrieval: ProfileRetrieval
+    generation: ProfileGeneration | null
+    judge: ProfileJudge | null
+}
+
+export interface PipelineProfile {
+    id: number
+    project_id: number
+    name: string
+    description: string
+    config: PipelineProfileConfig
+    created_at: string
+    updated_at: string
+}
+
+/** 预览响应: config_hash 与真提交落库的值逐字相同(见 process.md D7/D14)。 */
+export interface PipelinePreview {
+    snapshot: Record<string, unknown>
+    config_hash: string
+    chunking_hash: string
+    collection: string
+    generation_enabled: boolean
+    judge_enabled: boolean
+}
+
 // ---- A/B 对比(M5-1, process.md D6/D18) ----
 
 export interface ABMetricDelta {

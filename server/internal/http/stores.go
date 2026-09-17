@@ -59,6 +59,19 @@ type RunStore interface {
 	JobProgress(ctx context.Context, jobID int64) (map[string]int, error)
 }
 
+// PipelineProfileStore 配置模板(M5-2): 一组可复用的评测配置。
+type PipelineProfileStore interface {
+	ListPipelineProfiles(ctx context.Context, projectID int64) ([]store.PipelineProfile, error)
+	GetPipelineProfile(ctx context.Context, id int64) (store.PipelineProfile, error)
+	CreatePipelineProfile(
+		ctx context.Context, projectID int64, name, description string, config map[string]any,
+	) (store.PipelineProfile, error)
+	UpdatePipelineProfile(
+		ctx context.Context, id int64, name, description *string, config map[string]any,
+	) (store.PipelineProfile, error)
+	DeletePipelineProfile(ctx context.Context, id int64) error
+}
+
 // QdrantPointStore 按 id 取回 chunk 正文(M4-4.1)。
 //
 // 正文只在向量库里有一份, 不落库(process.md D17), 所以报告抽屉要展示上下文时

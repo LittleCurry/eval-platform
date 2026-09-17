@@ -1,4 +1,5 @@
-.PHONY: help up-deps down-deps ps api migrate-up migrate-down migrate-version \
+.PHONY: help up-deps down-deps ps api api-restart api-logs api-stop \
+        migrate-up migrate-down migrate-version \
         migrate-create worker-setup worker-test worker-lint worker-healthcheck \
         attribution drill drill-compare compare parallel-demo test test-live lint verify
 
@@ -16,8 +17,45 @@ ps: ## 查看依赖服务状态
 	docker compose ps
 
 # ---- Go API ----
-api: ## 本地运行 Go API (先 make up-deps)
+api: ## 本地运行 Go API (前台, 先 make up-deps)
 	cd server && go run ./cmd/api
+
+# 开发期最常踩的坑: 旧实例还占着端口, 新实例启动即失败(日志里是 bind: address already in use),
+# 但 curl 打到旧进程上, 表现成"我改的代码没生效"。这个目标把"按端口杀 + 重启 + 等就绪"一次做完。
+#
+# 两个细节是踩出来的:
+# 1) 只杀 -sTCP:LISTEN 的监听者: 直接 `lsof -ti :8080` 会把**连到这个端口的客户端**
+#    (浏览器/微信等)也列出来, 照着杀就误伤;
+# 2) 启动时把 stdin/stdout/stderr 全部重定向(</dev/null >日志 2>&1): 否则后台进程会继承
+#    调用方的管道/终端, "make 结束了但 shell 不返回"就是这么来的。
+#
+# API 监听端口由环境变量 PORT 决定(默认 8080); 若你改了 PORT, 这里也要跟着传 API_PORT=...
+API_PORT ?= 8080
+
+api-restart: ## 重启本地 API(按端口杀旧实例 + 后台起 + 等 healthz): make api-restart [API_PORT=8080]
+	@port=$(API_PORT); \
+	pids=$$(lsof -nP -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
+	if [ -n "$$pids" ]; then \
+	  echo "端口 $$port 上的监听进程:"; ps -o pid=,command= -p $$pids | cut -c1-100; \
+	  kill $$pids 2>/dev/null || true; \
+	  for _ in 1 2 3 4 5; do sleep 1; lsof -nP -ti tcp:$$port -sTCP:LISTEN >/dev/null 2>&1 || break; done; \
+	  pids=$$(lsof -nP -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
+	  if [ -n "$$pids" ]; then echo "仍在监听, 强制结束: $$pids"; kill -9 $$pids 2>/dev/null || true; sleep 1; fi; \
+	else echo "端口 $$port 空闲(无需清理)"; fi; \
+	( cd server && nohup go run ./cmd/api </dev/null >/tmp/eval-api.log 2>&1 & ); \
+	echo "已后台启动, 日志: /tmp/eval-api.log"
+	@i=0; while [ $$i -lt 30 ]; do i=$$((i+1)); \
+	  if curl -sf -m 2 http://127.0.0.1:$(API_PORT)/healthz >/dev/null 2>&1; then \
+	    echo "✅ API 就绪: http://127.0.0.1:$(API_PORT)"; exit 0; fi; \
+	  sleep 1; done; \
+	echo "❌ 30 秒内未就绪, 日志尾部:"; tail -10 /tmp/eval-api.log; exit 1
+
+api-logs: ## 查看后台 API 日志尾部: make api-logs [N=30]
+	tail -n $(or $(N),30) /tmp/eval-api.log
+
+api-stop: ## 停掉本地 API(只杀监听该端口的进程)
+	@pids=$$(lsof -nP -ti tcp:$(API_PORT) -sTCP:LISTEN 2>/dev/null || true); \
+	if [ -n "$$pids" ]; then kill $$pids 2>/dev/null || true; echo "已停止: $$pids"; else echo "端口 $(API_PORT) 上没有监听进程"; fi
 
 # ---- 数据库迁移 (golang-migrate) ----
 -include .env
