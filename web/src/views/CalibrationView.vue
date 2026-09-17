@@ -18,11 +18,15 @@ import {
 } from 'naive-ui'
 import { listRuns } from '../api/runs'
 import { getJudgeCalibration } from '../api/humanGold'
-import type { GoldScoreCalibration, JudgeCalibration, Run } from '../api/types'
+import type { CalibrationDisagreement, GoldScoreCalibration, JudgeCalibration, Run } from '../api/types'
 import { shortHash } from '../utils/format'
 import {
   biasText,
   binaryConfusionCells,
+  disagreementEmptyHint,
+  disagreementLabel,
+  disagreementSummary,
+  disagreementTagType,
   calibrationVerdict,
   confusionMax,
   coverageText,
@@ -94,6 +98,48 @@ const verdict = computed(() => (report.value ? calibrationVerdict(report.value) 
 const usable = computed(() => (report.value ? isCalibrationUsable(report.value) : false))
 const confusions = computed(() => (report.value?.binary ? binaryConfusionCells(report.value.binary) : []))
 const notes = computed(() => notesWithSeverity(report.value?.notes ?? []))
+const disagreements = computed(() => report.value?.disagreements ?? [])
+
+/**
+ * 判错清单的直接动作: 去报告页看这道题(答案 + 断言逐条 + 上下文正文)。
+ * 校准报告的价值就在"点得进去"—— 只给 κ 数字, 人不知道 prompt 该改哪里。
+ */
+function openCase(row: CalibrationDisagreement) {
+  if (!runId.value) return
+  router.push({ path: `/runs/${runId.value}`, query: { case: String(row.case_id) } })
+}
+
+const disagreementColumns: DataTableColumns<CalibrationDisagreement> = [
+  { title: 'qid', key: 'qid', width: 110, render: (row) => row.qid || `case ${row.case_id}` },
+  {
+    title: '错法',
+    key: 'kind',
+    width: 200,
+    render: (row) =>
+        h(NTag, { size: 'small', type: disagreementTagType(row.kind) },
+            { default: () => disagreementLabel(row.kind) }),
+  },
+  {
+    title: '人工判定',
+    key: 'human',
+    width: 140,
+    render: (row) => (row.human_verdict === 'hallucinated' ? '有幻觉' : '忠实'),
+  },
+  {
+    title: 'judge 的无据断言数',
+    key: 'unsupported',
+    width: 160,
+    render: (row) => String(row.judge_unsupported),
+  },
+  {
+    title: '操作',
+    key: 'action',
+    width: 120,
+    render: (row) =>
+        h(NButton, { size: 'tiny', quaternary: true, onClick: () => openCase(row) },
+            { default: () => '看这道题' }),
+  },
+]
 const interText = computed(() => (report.value ? interAnnotatorText(report.value) : null))
 
 /** 分数校准的两张表: usefulness 与 relevance 各一张 5×5。 */
@@ -241,7 +287,8 @@ function scoreRows(score: GoldScoreCalibration): { human: number; counts: number
         <NGi span="4 s:2 m:1">
           <NStatistic label="主标注员" :value="report.primary_annotator || '—'" />
           <NText depth="3" style="font-size: 12px">
-            {{ report.annotators.length > 1 ? `共 ${report.annotators.length} 人` : '单人标注' }}
+            {{ report.annotators.length > 1 ? `共 ${report.annotators.length} 人` : '单人标注' }} ｜
+            已复核 {{ report.gold_reviewed }}/{{ report.cases_with_gold }}
           </NText>
         </NGi>
       </NGrid>
@@ -263,6 +310,25 @@ function scoreRows(score: GoldScoreCalibration): { human: number; counts: number
       <NText depth="3" style="display: block; margin-top: 10px; font-size: 12px">
         为什么还看 κ：幻觉率本身很低时, 一个"永远说没有幻觉"的判定也能拿到 90% 一致率,
         κ 会把"瞎猜也能对"的部分扣掉 —— κ≈0 就说明 judge 没比常数分类器多任何信息。
+      </NText>
+    </NCard>
+
+    <NCard v-if="report" title="judge 判错的题（漏判在前）" style="margin-bottom: 16px">
+      <NText depth="3" style="display: block; margin-bottom: 8px; font-size: 12px">
+        {{ disagreementSummary(disagreements) }}
+      </NText>
+      <NEmpty v-if="disagreements.length === 0" :description="disagreementEmptyHint(report)" />
+      <NDataTable
+          v-else
+          :columns="disagreementColumns"
+          :data="disagreements"
+          :row-key="(row: CalibrationDisagreement) => String(row.case_id)"
+          :pagination="false"
+          :scroll-x="720"
+          size="small"
+      />
+      <NText depth="3" style="display: block; margin-top: 8px; font-size: 12px">
+        漏判会让幻觉被当成正确答出去, 误报只是多花人工 —— 改 judge prompt 时先修漏判。
       </NText>
     </NCard>
 

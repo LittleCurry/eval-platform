@@ -21,7 +21,7 @@ import {
   NText,
 } from 'naive-ui'
 import { getCaseContext, getRunCaseResults, listRuns } from '../api/runs'
-import { listHumanGold, upsertHumanGold } from '../api/humanGold'
+import { listHumanGold, updateHumanGold, upsertHumanGold } from '../api/humanGold'
 import type { CaseContextResponse, HumanGoldScore, Run, RunCaseResult } from '../api/types'
 import { formatPercent, shortHash } from '../utils/format'
 import { flagLabel, primaryFlag, claimLabel, claimTagType } from '../utils/report'
@@ -29,9 +29,11 @@ import {
   GOLD_SHORTCUT_HELP,
   GOLD_VERDICTS,
   goldProgressText,
+  goldReviewText,
   goldShortcut,
   goldVerdictLabel,
   goldVerdictType,
+  reviewTagType,
 } from '../utils/calibration'
 
 const route = useRoute()
@@ -96,6 +98,9 @@ const rows = computed<GoldRow[]>(() =>
 )
 
 const scoredCount = computed(() => rows.value.filter((row) => row.gold !== null).length)
+
+/** 复核进度按"我"名下的金标算(复核是标注员自己的口径)。 */
+const reviewText = computed(() => goldReviewText([...goldByCase.value.values()], scoredCount.value))
 
 const selected = computed(() => {
   if (selectedCaseId.value === null) return null
@@ -162,6 +167,27 @@ async function save(payload: { verdict?: string; relevance?: number; helpfulness
 async function markVerdict(verdict: string) {
   await save({ verdict })
   next()
+}
+
+/**
+ * 复核标记: 表示"这条金标被第二个人看过并确认"。
+ *
+ * 单独一个 PATCH 而不是跟着判词一起提交: 复核是**事后**动作(先自己标完, 再换个人看),
+ * 混在打分请求里会让"谁复核的"这件事失去意义。
+ */
+async function toggleReviewed(reviewed: boolean) {
+  const gold = selected.value?.gold
+  if (!gold) return
+  saving.value = true
+  try {
+    await updateHumanGold(gold.id, { reviewed })
+    golds.value = await listHumanGold({ runId: runId.value as number })
+    message.success(reviewed ? '已标记复核' : '已取消复核标记')
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    saving.value = false
+  }
 }
 
 async function loadContext() {
@@ -249,6 +275,16 @@ const columns: DataTableColumns<GoldRow> = [
     render: (row) => (row.gold?.helpfulness ? `${row.gold.helpfulness} 分` : '—'),
   },
   {
+    title: '复核',
+    key: 'reviewed',
+    width: 70,
+    render: (row) =>
+        row.gold
+            ? h(NTag, { size: 'small', type: reviewTagType(row.gold.reviewed) },
+                { default: () => (row.gold?.reviewed ? '已复核' : '未复核') })
+            : '—',
+  },
+  {
     title: '机器主因',
     key: 'flag',
     width: 150,
@@ -293,6 +329,7 @@ function onRowProps(row: GoldRow) {
             @blur="rememberAnnotator"
         />
         <NTag v-if="runId" size="small" type="info">{{ goldProgressText(rows.length, scoredCount) }}</NTag>
+        <NTag v-if="runId" size="small">{{ reviewText }}</NTag>
         <NButton
             v-if="runId"
             size="small"
@@ -449,6 +486,20 @@ function onRowProps(row: GoldRow) {
                 {{ judgeRubricHint }}（打完分才显示, 免得锚定你的判断）
               </NText>
             </NAlert>
+
+            <NSpace align="center" style="margin-bottom: 10px">
+              <NText depth="3" style="font-size: 12px">复核（换个人看过并确认）</NText>
+              <NSwitch
+                  :value="selected.gold?.reviewed ?? false"
+                  :disabled="!selected.gold"
+                  size="small"
+                  @update:value="toggleReviewed"
+              />
+              <NTag v-if="selected.gold" size="small" :type="reviewTagType(selected.gold.reviewed)">
+                {{ selected.gold.reviewed ? '已复核' : '未复核' }}
+              </NTag>
+              <NText v-if="!selected.gold" depth="3" style="font-size: 12px">先判定后才能标记复核</NText>
+            </NSpace>
 
             <NInput
                 v-model:value="noteDraft"

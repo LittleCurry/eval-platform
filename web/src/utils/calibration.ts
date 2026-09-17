@@ -3,7 +3,12 @@
 // 这一屏最容易犯的错是"报一个漂亮数字就完事": 4 题金标也能算出 κ=1。
 // 所以这里所有函数都围绕一件事 —— **把不可信的原因顶到人眼前**。
 
-import type { GoldBinaryCalibration, GoldScoreCalibration, JudgeCalibration } from '../api/types'
+import type {
+    CalibrationDisagreement,
+    GoldBinaryCalibration,
+    GoldScoreCalibration,
+    JudgeCalibration,
+} from '../api/types'
 import type { TagType } from './format'
 
 /** 三值判定的中文与配色: "看不清"用灰色, 不给人"选它更省事"的暗示。 */
@@ -64,6 +69,23 @@ export function goldShortcut(key: string): { kind: 'verdict' | 'next' | 'prev'; 
 export const GOLD_SHORTCUT_HELP =
     '快捷键：1 忠实(有据) ｜ 2 有幻觉(无据) ｜ 3 看不清 ｜ n 下一题 ｜ b 上一题。' +
     '判词是必填, 分数(1–5 星)可以后补 —— 先判有没有幻觉, 再回头补分。'
+
+/**
+ * 复核进度: "已复核 3/12"。
+ *
+ * 为什么要单独报这一个数: 单人未复核的金标只能证明"这个人 vs judge"一致,
+ * 不能证明"人工 vs judge"一致 —— 换个人标一遍结论可能就变了。
+ */
+export function goldReviewText(golds: { reviewed: boolean }[], annotated: number): string {
+    const reviewed = golds.filter((item) => item.reviewed).length
+    if (annotated === 0) return '还没有可复核的金标'
+    return `已复核 ${reviewed}/${annotated}`
+}
+
+/** 复核标记的配色: 复核过才给绿色, 否则灰色(不暗示"没复核=不好")。 */
+export function reviewTagType(reviewed?: boolean): TagType {
+    return reviewed ? 'success' : 'default'
+}
 
 /** κ 的解读档位(Landis & Koch 的口径, 但每档都配一句"这意味着什么")。 */
 export interface KappaBand {
@@ -225,6 +247,37 @@ export function noteSeverity(note: string): TagType {
 
 export function notesWithSeverity(notes: string[]): { text: string; type: TagType }[] {
     return notes.map((text) => ({ text, type: noteSeverity(text) }))
+}
+
+/** 判错类型的中文与配色: 漏判是红(幻觉会流到线上), 误报是黄(只是多花人工)。 */
+export function disagreementLabel(kind: string): string {
+    return kind === 'missed' ? '漏判(judge 放过了幻觉)' : '误报(judge 冤枉了答案)'
+}
+
+export function disagreementTagType(kind: string): TagType {
+    return kind === 'missed' ? 'error' : 'warning'
+}
+
+/**
+ * 判错清单的一句话总结, 以及"先去看哪些"。
+ *
+ * 为什么把漏判单列: 误报只是多花人工, 漏判会让幻觉直接被当成正确答出去 ——
+ * 改 prompt 的优先级完全不一样。
+ */
+export function disagreementSummary(items: CalibrationDisagreement[]): string {
+    if (!items || items.length === 0) return '没有发现人机不一致的题'
+    const missed = items.filter((item) => item.kind === 'missed').length
+    const alarm = items.length - missed
+    const parts: string[] = []
+    if (missed > 0) parts.push(`漏判 ${missed} 题`)
+    if (alarm > 0) parts.push(`误报 ${alarm} 题`)
+    return `${parts.join(' ｜ ')}（共 ${items.length} 题不一致, 漏判排在前面）`
+}
+
+/** 判错清单为空时给一句"这其实是好消息", 而不是让人怀疑数据没加载出来。 */
+export function disagreementEmptyHint(report: JudgeCalibration): string {
+    if (!report.binary) return '没有可配对的判定结论, 还谈不上"判错"'
+    return `已比对的 ${report.binary.pairs} 题里, judge 与人工的判定完全一致`
 }
 
 /** 金标是否足够支撑结论(页面顶部用来决定"结论卡"是否置灰)。 */

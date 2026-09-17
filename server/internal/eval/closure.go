@@ -273,12 +273,22 @@ func ComputeClosure(
 
 		// 销单只认"状态是 fixed + 这次确实变好": open 的题先标 fixed 再谈验证,
 		// 否则 verified 会失去"M6 闭环走完"的含义(D20)。
-		if record.Verdict == ClosureImproved && annotation.Status == "fixed" {
-			record.EligibleForVerify = true
-			record.BlockedReason = ""
-			report.Summary.EligibleForVerify++
-		} else if record.Verdict == ClosureImproved && annotation.Status == "open" {
-			record.BlockedReason = "确实变好了, 但状态还是 open: 先标 fixed 再走验证, 否则 verified 失去含义"
+		//
+		// 四种状态 × "确实变好了"都要有明确交代, 否则前端只能显示含糊的"还不能销单",
+		// 标注员看完不知道该干什么 —— 而闭环唯一的价值就是告诉他下一步做什么。
+		if record.Verdict == ClosureImproved {
+			switch annotation.Status {
+			case "fixed":
+				record.EligibleForVerify = true
+				record.BlockedReason = ""
+				report.Summary.EligibleForVerify++
+			case "open":
+				record.BlockedReason = "确实变好了, 但状态还是 open: 先标 fixed 再走验证, 否则 verified 失去含义"
+			case "verified":
+				record.BlockedReason = "这条已经验证过了, 不用重复销单"
+			case "wontfix":
+				record.BlockedReason = "当时判为不修(wontfix), 但这次确实变好了: 可以改成 verified, 把结论记下来"
+			}
 		}
 		report.Records = append(report.Records, record)
 	}

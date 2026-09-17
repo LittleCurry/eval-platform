@@ -11,6 +11,8 @@ import {
   NEmpty,
   NGi,
   NGrid,
+  NInputNumber,
+  NModal,
   NSelect,
   NSpace,
   NStatistic,
@@ -18,12 +20,15 @@ import {
   NTag,
   NText,
 } from 'naive-ui'
-import { listRuns } from '../api/runs'
+import { getRun, listRuns, submitRun } from '../api/runs'
 import { getClosure } from '../api/closure'
 import { listAnnotations, updateAnnotation } from '../api/annotations'
-import type { Annotation, ClosureRecord, ClosureReport, Run } from '../api/types'
+import { listPipelineProfiles, previewPipeline } from '../api/pipelineProfiles'
+import type { Annotation, ClosureRecord, ClosureReport, PipelineProfile, Run } from '../api/types'
 import { shortHash } from '../utils/format'
 import { metricLabel } from '../utils/compare'
+import { configToForm, type ProfileForm } from '../utils/profile'
+import { describeChanges, formFromRunSnapshot, formToRunPayload, rerunGuard, sourceFromRunSnapshot } from '../utils/rerun'
 import { statusLabel, statusTagType } from '../utils/annotation'
 import { flagsText, evidenceText, evidenceHighlights, closureActionText, closureCards,
   closureGuard, closureSummaryLine, closureVerdictLabel, closureVerdictType, verifyHint,
@@ -158,6 +163,102 @@ onMounted(async () => {
   await loadClosure()
 })
 
+// ---- 改配置重跑(M6 闭环的中间一环: 发现没修好 -> 调参数 -> 重跑 -> 再核对) ----
+
+const showRerun = ref(false)
+const baselineSnapshot = ref<Record<string, unknown> | null>(null)
+const rerunForm = ref<ProfileForm | null>(null)
+const baselineForm = ref<ProfileForm | null>(null)
+const profiles = ref<PipelineProfile[]>([])
+const previewHash = ref<string>('')
+const previewing = ref(false)
+const submitting = ref(false)
+const submittedRun = ref<number | null>(null)
+
+const baselineSource = computed(() => sourceFromRunSnapshot(baselineSnapshot.value ?? undefined))
+const changes = computed(() =>
+    rerunForm.value && baselineForm.value ? describeChanges(rerunForm.value, baselineForm.value) : [],
+)
+const rerunWarning = computed(() =>
+    report.value && rerunForm.value
+        ? rerunGuard(report.value.baseline_hash, previewHash.value || undefined, changes.value.length)
+        : null,
+)
+
+/** 打开对话框时从上一版快照预填 —— 重跑必须"只改一个变量, 其余原样带过去"。 */
+async function openRerun() {
+  if (!baselineId.value) return
+  errorText.value = ''
+  showRerun.value = true
+  submittedRun.value = null
+  previewHash.value = ''
+  try {
+    const run = await getRun(baselineId.value)
+    baselineSnapshot.value = (run.config_snapshot ?? null) as Record<string, unknown> | null
+    const form = formFromRunSnapshot(baselineSnapshot.value ?? undefined)
+    baselineForm.value = form
+    rerunForm.value = { ...form, chunking: { ...form.chunking }, generation: { ...form.generation }, judge: { ...form.judge } }
+    profiles.value = await listPipelineProfiles(run.project_id || 1)
+  } catch (err) {
+    errorText.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+/** 套用配置模板: 整段替换(模板本来就是"一整套配置")。 */
+function applyProfile(profileId: number | null) {
+  const profile = profiles.value.find((item) => item.id === profileId)
+  if (!profile || !rerunForm.value) return
+  rerunForm.value = configToForm(profile.config)
+  previewHash.value = ''
+}
+
+/** 提交前算指纹: 与上一版相同就说明这是一次复现, 不会有任何可验证的变化。 */
+async function runPreview() {
+  if (!rerunForm.value) return
+  const payload = formToRunPayload(rerunForm.value, baselineSource.value)
+  if (!payload) {
+    message.error('快照里缺数据来源(dataset/corpus), 无法安全重跑')
+    return
+  }
+  previewing.value = true
+  try {
+    const preview = await previewPipeline(payload)
+    previewHash.value = preview.config_hash
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    previewing.value = false
+  }
+}
+
+async function doSubmit() {
+  if (!rerunForm.value) return
+  const payload = formToRunPayload(rerunForm.value, baselineSource.value)
+  if (!payload) {
+    message.error('快照里缺数据来源(dataset/corpus), 无法安全重跑')
+    return
+  }
+  submitting.value = true
+  try {
+    const ref = await submitRun(payload)
+    submittedRun.value = ref.run_id
+    message.success(`已提交 run #${ref.run_id}(${ref.items} 题), 等 worker 跑完后把它设为对照即可核对`)
+    await loadRuns()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err))
+  } finally {
+    submitting.value = false
+  }
+}
+
+/** 把刚提交的 run 设为 candidate: 闭环页立刻转到"新版本 vs 标注"的视角。 */
+function useSubmittedAsCandidate() {
+  if (!submittedRun.value) return
+  candidateId.value = submittedRun.value
+  showRerun.value = false
+  void loadClosure()
+}
+
 const columns: DataTableColumns<ClosureRecord> = [
   { title: 'qid', key: 'qid', width: 100, render: (row) => row.qid },
   {
@@ -258,6 +359,7 @@ const columns: DataTableColumns<ClosureRecord> = [
       <NSpace align="center" justify="space-between" style="margin-top: 14px">
         <NText style="font-size: 13px">{{ summaryLine }}</NText>
         <NSpace align="center">
+          <NButton size="small" @click="openRerun">改配置重跑</NButton>
           <NButton
               v-if="eligibleCount > 0"
               size="small"
@@ -287,6 +389,97 @@ const columns: DataTableColumns<ClosureRecord> = [
           size="small"
       />
     </NCard>
+
+    <NModal
+        v-model:show="showRerun"
+        preset="card"
+        title="改配置重跑（只改一个变量，其余沿用上一版快照）"
+        style="width: 640px"
+    >
+      <NEmpty v-if="!rerunForm" description="正在读取上一版的配置快照…" />
+      <template v-else>
+        <NAlert v-if="!baselineSource" type="error" :show-icon="false" style="margin-bottom: 10px">
+          上一版快照里没有 dataset/corpus, 不能重跑(宁可不跑, 也不能跑错数据集)
+        </NAlert>
+        <NText depth="3" style="display: block; margin-bottom: 10px; font-size: 12px">
+          数据来源：dataset {{ baselineSource?.datasetId ?? '—' }} · corpus {{ baselineSource?.corpusId ?? '—' }}
+          （与上一版一致, 重跑只改参数）
+        </NText>
+
+        <NSpace align="center" style="margin-bottom: 10px">
+          <NText depth="3" style="font-size: 12px; width: 70px">套用模板</NText>
+          <NSelect
+              :options="profiles.map((item) => ({ label: `${item.name}（${item.description || '无描述'}）`, value: item.id }))"
+              placeholder="可选：用配置模板整段替换"
+              style="width: 380px"
+              clearable
+              @update:value="applyProfile"
+          />
+        </NSpace>
+
+        <NSpace align="center" style="margin-bottom: 10px">
+          <NText depth="3" style="font-size: 12px; width: 70px">top_k</NText>
+          <NInputNumber v-model:value="rerunForm.topK" :min="1" :max="50" size="small" style="width: 120px" />
+          <NText depth="3" style="font-size: 12px">上一版 {{ baselineForm?.topK }}</NText>
+        </NSpace>
+
+        <NSpace align="center" style="margin-bottom: 10px">
+          <NText depth="3" style="font-size: 12px; width: 70px">生成</NText>
+          <NSwitch v-model:value="rerunForm.generationEnabled" size="small" />
+          <NText depth="3" style="font-size: 12px">
+            {{ rerunForm.generationEnabled ? rerunForm.generation.model : '不跑生成(只测检索)' }}
+          </NText>
+        </NSpace>
+
+        <NSpace align="center" style="margin-bottom: 12px">
+          <NText depth="3" style="font-size: 12px; width: 70px">判定</NText>
+          <NSwitch v-model:value="rerunForm.judgeEnabled" size="small" />
+          <NText depth="3" style="font-size: 12px">
+            {{ rerunForm.judgeEnabled ? `${rerunForm.judge.model} · ${rerunForm.judge.claims_prompt_id}` : '不跑判定' }}
+          </NText>
+        </NSpace>
+
+        <NAlert v-if="changes.length === 0" type="warning" :show-icon="false" style="margin-bottom: 10px">
+          一个参数都没改：这会是上一版的复现（指纹相同），闭环页只会看到噪声。
+        </NAlert>
+        <NAlert v-else type="info" :show-icon="false" style="margin-bottom: 10px">
+          改动：{{ changes.join('；') }}
+        </NAlert>
+
+        <NSpace align="center" style="margin-bottom: 10px">
+          <NButton size="small" :loading="previewing" @click="runPreview">算指纹（提交前确认这是新实验）</NButton>
+          <NText v-if="previewHash" depth="3" style="font-size: 12px">
+            将落库的 config_hash = {{ previewHash.slice(0, 12) }}… ｜ 上一版 {{ report?.baseline_hash.slice(0, 12) }}…
+          </NText>
+        </NSpace>
+
+        <NAlert v-if="rerunWarning" :type="rerunWarning.type" :show-icon="false" style="margin-bottom: 10px">
+          <NText style="font-size: 12px">{{ rerunWarning.text }}</NText>
+        </NAlert>
+
+        <NAlert v-if="submittedRun" type="success" :show-icon="false" style="margin-bottom: 10px">
+          <NSpace align="center" justify="space-between">
+            <NText style="font-size: 12px">
+              run #{{ submittedRun }} 已入队（worker 跑完后回来看闭环）
+            </NText>
+            <NButton size="tiny" type="primary" quaternary @click="useSubmittedAsCandidate">设为对照</NButton>
+          </NSpace>
+        </NAlert>
+
+        <NText depth="3" style="display: block; font-size: 12px">
+          提交前请确认 worker 在跑（`make worker`）：run 会先入队, 由 worker 逐个 case 执行。
+        </NText>
+      </template>
+
+      <template #footer>
+        <NSpace justify="end">
+          <NButton size="small" @click="showRerun = false">关闭</NButton>
+          <NButton size="small" type="primary" :loading="submitting" :disabled="!rerunForm" @click="doSubmit">
+            提交重跑
+          </NButton>
+        </NSpace>
+      </template>
+    </NModal>
 
     <NCard v-if="report && report.notes.length" title="提醒" size="small">
       <NSpace vertical :size="8">

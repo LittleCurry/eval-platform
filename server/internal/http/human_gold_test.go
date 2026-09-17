@@ -186,7 +186,7 @@ func goldRows() []store.HumanGoldScore {
 		{ID: 2, RunID: 155, CaseID: 12, Annotator: "me", Verdict: "faithful",
 			Relevance: &five, Helpfulness: &four},
 		{ID: 3, RunID: 155, CaseID: 13, Annotator: "me", Verdict: "faithful",
-			Relevance: &four, Helpfulness: &four},
+			Relevance: &four, Helpfulness: &four, Reviewed: true},
 		{ID: 4, RunID: 155, CaseID: 14, Annotator: "me", Verdict: "unclear"},
 	}
 }
@@ -438,6 +438,9 @@ func TestJudgeCalibrationReport(t *testing.T) {
 	}
 	if report.InterAnnotator != nil {
 		t.Fatalf("只有一位标注员时不该有人工间一致性: %+v", report.InterAnnotator)
+	}
+	if report.GoldReviewed != 1 {
+		t.Fatalf("复核标记要从金标行流进报告(这里应有 1 条): %d", report.GoldReviewed)
 	}
 
 	joined := strings.Join(report.Notes, "\n")

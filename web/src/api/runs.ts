@@ -4,9 +4,11 @@ import type {
     CaseContextResponse,
     Run,
     RunCaseResult,
+    RunJobRef,
     RunProgress,
     RunReport,
 } from './types'
+import type { PipelinePreviewPayload } from './pipelineProfiles'
 
 export interface ListRunsParams {
     datasetId?: number
@@ -54,6 +56,17 @@ export function getRunProgress(id: number): Promise<RunProgress> {
  */
 export function getCaseContext(runId: number, caseId: number): Promise<CaseContextResponse> {
     return http.get(`/runs/${runId}/cases/${caseId}/context`)
+}
+
+/**
+ * 提交一次评测(M6 闭环的"改配置重跑"用)。
+ *
+ * 请求体复用配置模板那套字段名(PipelinePreviewPayload): 摊平的 top_k +
+ * chunking/generation/judge —— 与服务端提交侧、指纹预览完全同源, 少一处映射就少一次
+ * "提交出来的实验跟想的不一样"。未启用的阶段传 null(D14: 不启用就不进快照)。
+ */
+export function submitRun(payload: PipelinePreviewPayload): Promise<RunJobRef> {
+    return http.post('/runs', payload)
 }
 
 /** 两次 run 的 A/B 对比(M5-1): 逐题差值 + 显著性 + 翻转题清单 + 分层。 */

@@ -156,6 +156,52 @@ func TestComputeClosureOpenButImproved(t *testing.T) {
 	}
 }
 
+// TestComputeClosureStatusMatrix "确实变好了" × 四种标注状态都要有明确交代:
+// fixed 可销单, 其余三种各有一句"该干什么"。含糊的"还不能销单"等于没给结论。
+func TestComputeClosureStatusMatrix(t *testing.T) {
+	baseline := []ClosureCase{closureCase(61, "zjc-027", 0, "retrieval_miss")}
+	candidate := []ClosureCase{closureCase(61, "zjc-027", 1)}
+	options := ClosureOptions{BaselineAttribution: true, CandidateAttribution: true,
+		BaselineHash: "a", CandidateHash: "b"}
+
+	cases := []struct {
+		status     string
+		eligible   bool
+		wantPhrase string
+	}{
+		{"fixed", true, ""},
+		{"open", false, "先标 fixed"},
+		{"verified", false, "已经验证过"},
+		{"wontfix", false, "不修"},
+	}
+	for _, item := range cases {
+		report := ComputeClosure(
+			[]ClosureAnnotation{closureAnnotation(1, 61, item.status)}, baseline, candidate, options)
+		record := report.Records[0]
+		if record.Verdict != ClosureImproved {
+			t.Fatalf("%s: 结局应是 improved: %+v", item.status, record)
+		}
+		if record.EligibleForVerify != item.eligible {
+			t.Fatalf("%s: eligible 应为 %v: %+v", item.status, item.eligible, record)
+		}
+		if item.wantPhrase == "" {
+			if record.BlockedReason != "" {
+				t.Fatalf("可销单时不该有阻塞原因: %q", record.BlockedReason)
+			}
+			if report.Summary.EligibleForVerify != 1 {
+				t.Fatalf("可销单计数应为 1: %+v", report.Summary)
+			}
+			continue
+		}
+		if !strings.Contains(record.BlockedReason, item.wantPhrase) {
+			t.Fatalf("%s: 提示应含 %q, 实际 %q", item.status, item.wantPhrase, record.BlockedReason)
+		}
+		if report.Summary.EligibleForVerify != 0 {
+			t.Fatalf("%s: 不该进销单清单: %+v", item.status, report.Summary)
+		}
+	}
+}
+
 // TestComputeClosureAttributionMismatch 候选 run 没做过归因: 不能给出"全修好了"的假结论。
 // 这是最危险的假阳性 —— 会让人把没修的题全部销单。
 func TestComputeClosureAttributionMismatch(t *testing.T) {

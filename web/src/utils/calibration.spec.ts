@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest'
 import type { GoldBinaryCalibration, JudgeCalibration } from '../api/types'
 import {
     biasText,
+    disagreementEmptyHint,
+    disagreementLabel,
+    disagreementSummary,
+    disagreementTagType,
+    goldReviewText,
+    reviewTagType,
     binaryConfusionCells,
     calibrationVerdict,
     confusionMax,
@@ -46,6 +52,8 @@ function report(overrides: Partial<JudgeCalibration> = {}): JudgeCalibration {
         coverage: 0.5333,
         gold_judged: 32,
         gold_unjudged: 0,
+        gold_reviewed: 0,
+        disagreements: [],
         notes: [],
         ...overrides,
     }
@@ -64,6 +72,20 @@ describe('gold verdict', () => {
 
     it('进度文字用"已标 X/Y"', () => {
         expect(goldProgressText(30, 12)).toBe('已标 12/30')
+    })
+})
+
+describe('goldReviewText / reviewTagType', () => {
+    it('复核进度报"已复核 X/Y", 没有金标时说清', () => {
+        expect(goldReviewText([{ reviewed: true }, { reviewed: false }, { reviewed: true }], 3))
+            .toBe('已复核 2/3')
+        expect(goldReviewText([], 0)).toBe('还没有可复核的金标')
+    })
+
+    it('只有复核过才给绿色 —— 未复核用灰色, 不暗示"标错了"', () => {
+        expect(reviewTagType(true)).toBe('success')
+        expect(reviewTagType(false)).toBe('default')
+        expect(reviewTagType(undefined)).toBe('default')
     })
 })
 
@@ -216,6 +238,37 @@ describe('interAnnotatorText', () => {
 
     it('只有一位标注员时没有这一段', () => {
         expect(interAnnotatorText(report())).toBeNull()
+    })
+})
+
+describe('判错清单', () => {
+    const items = [
+        { case_id: 3, qid: 'zjc-003', kind: 'missed' as const, human_verdict: 'hallucinated' as const, judge_unsupported: 0 },
+        { case_id: 9, qid: 'zjc-009', kind: 'missed' as const, human_verdict: 'hallucinated' as const, judge_unsupported: 0 },
+        { case_id: 5, qid: 'zjc-005', kind: 'false_alarm' as const, human_verdict: 'faithful' as const, judge_unsupported: 2 },
+    ]
+
+    it('漏判是红、误报是黄 —— 两种错的代价不一样', () => {
+        expect(disagreementTagType('missed')).toBe('error')
+        expect(disagreementTagType('false_alarm')).toBe('warning')
+        expect(disagreementLabel('missed')).toContain('漏判')
+        expect(disagreementLabel('false_alarm')).toContain('误报')
+    })
+
+    it('总结先报漏判, 再报误报', () => {
+        const text = disagreementSummary(items)
+        expect(text).toContain('漏判 2 题')
+        expect(text).toContain('误报 1 题')
+        expect(text).toContain('共 3 题不一致')
+    })
+
+    it('没有不一致时是好消息, 而不是空表', () => {
+        expect(disagreementSummary([])).toBe('没有发现人机不一致的题')
+        expect(disagreementEmptyHint(report())).toContain('完全一致')
+    })
+
+    it('没有可配对样本时不许说"完全一致"', () => {
+        expect(disagreementEmptyHint(report({ binary: undefined }))).toContain('谈不上')
     })
 })
 

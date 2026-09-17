@@ -39,6 +39,9 @@ type CalibrationItem struct {
 	HumanVerdict     string
 	HumanRelevance   *int
 	HumanHelpfulness *int
+	// Reviewed 表示这条金标被第二个人复核过。金标本身没复核过时, κ 反映的
+	// 只是"一个人 vs judge"的口径, 不是"人工 vs judge" —— 报告必须说清这一点。
+	Reviewed bool
 
 	// judge 侧: judge_has_opinion=false 表示这次没有判定结论(claims 为空),
 	// 不能当成"judge 认为没有幻觉" —— 那正是 M4-2 踩过的坑。
@@ -75,6 +78,29 @@ type ScoreCalibration struct {
 	Confusion [5][5]int `json:"confusion"`
 }
 
+// 校准里"judge 判错"的两种错法。
+const (
+	// DisagreementMissed 人工说有幻觉, judge 说没问题(漏判)。
+	DisagreementMissed = "missed"
+	// DisagreementFalseAlarm judge 说有幻觉, 人工说没问题(误报)。
+	DisagreementFalseAlarm = "false_alarm"
+)
+
+// CalibrationDisagreement 一条人机不一致的题。
+//
+// 为什么光有 κ 不够: κ 只告诉你"judge 行不行", 要**改 prompt** 就得知道"它把哪几道题判错了"。
+// 漏判排在误报前面 —— 漏判会让幻觉流到线上, 误报只是多花人工。
+type CalibrationDisagreement struct {
+	CaseID           int64  `json:"case_id"`
+	QID              string `json:"qid,omitempty"`
+	Kind             string `json:"kind"`
+	HumanVerdict     string `json:"human_verdict"`
+	JudgeUnsupported int    `json:"judge_unsupported"`
+}
+
+// MaxDisagreements 清单最多给多少条(再多就该去筛 bad case, 而不是在报告里翻页)。
+const MaxDisagreements = 50
+
 // InterAnnotator 两个人独立打分之间的一致性(金标可信度的前提)。
 type InterAnnotator struct {
 	AnnotatorsA    string   `json:"annotators_a"`
@@ -110,6 +136,12 @@ type CalibrationReport struct {
 	GoldJudged   int `json:"gold_judged"`
 	GoldUnjudged int `json:"gold_unjudged"`
 
+	// GoldReviewed 这些金标里有多少条经过复核(复核 = 第二个人看过并确认)。
+	GoldReviewed int `json:"gold_reviewed"`
+
+	// Disagreements 人机不一致的题(漏判在前), 用于直接去看"judge 错在哪"。
+	Disagreements []CalibrationDisagreement `json:"disagreements"`
+
 	// Notes 是给人看的诚实提醒(样本太少 / 金标覆盖不足 / 没有双人打分 / 判定缺失)。
 	Notes []string `json:"notes"`
 }
@@ -125,10 +157,11 @@ type CalibrationOptions struct {
 // "两人不一致"会被误读成"judge 不准"。
 func ComputeCalibration(runID int64, items []CalibrationItem, opts CalibrationOptions) CalibrationReport {
 	report := CalibrationReport{
-		RunID:      runID,
-		TotalCases: opts.TotalCases,
-		Annotators: []string{},
-		Notes:      []string{},
+		RunID:         runID,
+		TotalCases:    opts.TotalCases,
+		Annotators:    []string{},
+		Notes:         []string{},
+		Disagreements: []CalibrationDisagreement{},
 	}
 
 	byAnnotator := map[string][]CalibrationItem{}
@@ -163,6 +196,9 @@ func ComputeCalibration(runID int64, items []CalibrationItem, opts CalibrationOp
 		} else {
 			report.GoldUnjudged++
 		}
+		if item.Reviewed {
+			report.GoldReviewed++
+		}
 	}
 	report.CasesWithGold = len(cases)
 	if opts.TotalCases > 0 {
@@ -170,6 +206,7 @@ func ComputeCalibration(runID int64, items []CalibrationItem, opts CalibrationOp
 	}
 
 	report.Binary = computeBinary(primaryItems)
+	report.Disagreements = collectDisagreements(primaryItems)
 	report.Helpfulness = computeScores(primaryItems, scoreHelpfulness)
 	report.Relevance = computeScores(primaryItems, scoreRelevance)
 
@@ -192,12 +229,66 @@ func ComputeCalibration(runID int64, items []CalibrationItem, opts CalibrationOp
 		report.Notes = append(report.Notes,
 			"有 "+strconv.Itoa(report.Binary.ExcludedUnclear)+" 题人工判为\"看不清\", 已排除出二分类样本(不计入一致率)")
 	}
+	switch {
+	case report.CasesWithGold >= MinCalibrationPairs && report.GoldReviewed == 0:
+		// 单人未复核时 κ 只是"个人口径 vs judge": 换个人标一遍结论可能就变了,
+		// 所以要把这句话说在报告里, 而不是让人误以为这是"人工"的普遍结论。
+		report.Notes = append(report.Notes,
+			"所有金标都还没复核: 建议至少抽 20% 双人复核, 否则 κ 只是一个人 vs judge 的口径")
+	case report.GoldReviewed > 0:
+		report.Notes = append(report.Notes,
+			"有 "+strconv.Itoa(report.GoldReviewed)+"/"+strconv.Itoa(report.CasesWithGold)+" 道金标经过复核")
+	}
+	if missed := countDisagreement(report.Disagreements, DisagreementMissed); missed > 0 {
+		report.Notes = append(report.Notes,
+			"有 "+strconv.Itoa(missed)+" 题是漏判(人工说有幻觉, judge 说没问题) —— "+
+				"这类错会让幻觉流到线上, 优先看它们改 judge prompt")
+	}
 	if report.GoldUnjudged > 0 {
 		report.Notes = append(report.Notes,
 			"有 "+strconv.Itoa(report.GoldUnjudged)+" 题 judge 没有给出判定结论"+
 				"(答案没有可核查断言, 或这次 run 没开判定): 它们不参与幻觉校准")
 	}
 	return report
+}
+
+// collectDisagreements 挑出人机不一致的题: 漏判在前, 再按 case_id 稳定排序。
+//
+// 只收"两侧都有意见"的题: 人工判"看不清"或 judge 没有结论的题不算判错 ——
+// 那是"没意见", 计进"判错"会冤枉 judge(也会冤枉人)。
+func collectDisagreements(items []CalibrationItem) []CalibrationDisagreement {
+	out := make([]CalibrationDisagreement, 0)
+	for _, item := range items {
+		if item.HumanVerdict == VerdictUnclear || !item.JudgeHasOpinion {
+			continue
+		}
+		humanPositive := item.HumanVerdict == VerdictHallucinated
+		judgePositive := item.JudgeUnsupported > 0
+		if humanPositive == judgePositive {
+			continue
+		}
+		kind := DisagreementFalseAlarm
+		if humanPositive {
+			kind = DisagreementMissed
+		}
+		out = append(out, CalibrationDisagreement{
+			CaseID:           item.CaseID,
+			QID:              item.QID,
+			Kind:             kind,
+			HumanVerdict:     item.HumanVerdict,
+			JudgeUnsupported: item.JudgeUnsupported,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind == DisagreementMissed
+		}
+		return out[i].CaseID < out[j].CaseID
+	})
+	if len(out) > MaxDisagreements {
+		return out[:MaxDisagreements]
+	}
+	return out
 }
 
 // computeBinary 幻觉检测的二分类校准。
@@ -381,6 +472,17 @@ func cohenKappa(labelsA, labelsB []string) float64 {
 		return 0 // 没有任何变异: κ 无定义
 	}
 	return (po - pe) / (1 - pe)
+}
+
+// countDisagreement 数某一类判错多少条(用于提示语)。
+func countDisagreement(items []CalibrationDisagreement, kind string) int {
+	count := 0
+	for _, item := range items {
+		if item.Kind == kind {
+			count++
+		}
+	}
+	return count
 }
 
 func verdictLabel(positive bool) string {

@@ -263,6 +263,7 @@ func (h *humanGoldHandler) Calibration(c *gin.Context) {
 			HumanVerdict:     score.Verdict,
 			HumanRelevance:   score.Relevance,
 			HumanHelpfulness: score.Helpfulness,
+			Reviewed:         score.Reviewed,
 		}
 		if ok {
 			item.QID = row.QID

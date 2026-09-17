@@ -355,6 +355,15 @@ export interface AnnotationSuggestion {
 }
 
 
+/**
+ * 提交评测的返回(POST /runs): 落库并入队后立刻返回, 不等 worker 跑完(M3 异步化)。
+ */
+export interface RunJobRef {
+    run_id: number
+    job_id: number
+    items: number
+}
+
 // ---- 人工金标与 judge 校准(M6-3) ----
 
 /** 三值判定: "看不清"必须能表达 —— 逼标注员二选一, κ 会被瞎猜污染。 */
@@ -417,6 +426,15 @@ export interface GoldInterAnnotator {
     score_exact_rate?: number
 }
 
+/** 一条人机不一致的题: missed = 漏判(人工说有幻觉), false_alarm = 误报。 */
+export interface CalibrationDisagreement {
+    case_id: number
+    qid?: string
+    kind: 'missed' | 'false_alarm'
+    human_verdict: GoldVerdict
+    judge_unsupported: number
+}
+
 export interface JudgeCalibration {
     run_id: number
     total_cases: number
@@ -430,6 +448,10 @@ export interface JudgeCalibration {
     coverage: number
     gold_judged: number
     gold_unjudged: number
+    /** 这些金标里有多少条经过复核(复核 = 第二个人看过并确认)。 */
+    gold_reviewed: number
+    /** 人机不一致的题(漏判在前): 直接去看"judge 把哪几道题判错了"。 */
+    disagreements: CalibrationDisagreement[]
     /** 报告自曝的"别信我"条件(样本<20 / 单人 / 覆盖率低)。 */
     notes: string[]
 }

@@ -315,6 +315,109 @@ func TestComputeCalibrationNotes(t *testing.T) {
 	}
 }
 
+// TestComputeCalibrationReviewSignal 金标"有没有复核"必须出现在报告里:
+// 没复核过的金标, κ 只是一个人 vs judge 的口径, 不是"人工"的普遍结论。
+func TestComputeCalibrationReviewSignal(t *testing.T) {
+	build := func(reviewedCount int) []CalibrationItem {
+		items := make([]CalibrationItem, 0, 25)
+		for index := 0; index < 25; index++ {
+			items = append(items, CalibrationItem{
+				CaseID: int64(index + 1), Annotator: "me",
+				HumanVerdict: VerdictFaithful, JudgeHasOpinion: true,
+				Reviewed: index < reviewedCount,
+			})
+		}
+		return items
+	}
+
+	none := ComputeCalibration(155, build(0), CalibrationOptions{TotalCases: 25})
+	if none.GoldReviewed != 0 {
+		t.Fatalf("没有复核时计数应为 0: %d", none.GoldReviewed)
+	}
+	if !strings.Contains(strings.Join(none.Notes, "\n"), "都还没复核") {
+		t.Fatalf("样本够大但零复核时要提醒: %v", none.Notes)
+	}
+
+	some := ComputeCalibration(155, build(8), CalibrationOptions{TotalCases: 25})
+	if some.GoldReviewed != 8 {
+		t.Fatalf("复核计数应为 8: %d", some.GoldReviewed)
+	}
+	if !strings.Contains(strings.Join(some.Notes, "\n"), "8/25") {
+		t.Fatalf("要报出复核比例: %v", some.Notes)
+	}
+
+	// 样本很小时不提复核(那时更该先扩样本)
+	small := ComputeCalibration(155, build(0)[:5], CalibrationOptions{TotalCases: 5})
+	if strings.Contains(strings.Join(small.Notes, "\n"), "都还没复核") {
+		t.Fatalf("5 题时不该先念叨复核: %v", small.Notes)
+	}
+}
+
+// TestCollectDisagreements 判错清单: 漏判在前, "没意见"的题不算判错。
+//
+// 光有 κ 只能说"judge 行不行"; 要改 prompt 就得知道"它把哪几道题判错了"。
+func TestCollectDisagreements(t *testing.T) {
+	items := []CalibrationItem{
+		// 误报(judge 说有幻觉, 人工说没有)
+		{CaseID: 5, QID: "zjc-005", HumanVerdict: VerdictFaithful, JudgeHasOpinion: true, JudgeUnsupported: 2},
+		// 漏判(人工说有幻觉, judge 说没有) —— 更严重, 要排在前面
+		{CaseID: 9, QID: "zjc-009", HumanVerdict: VerdictHallucinated, JudgeHasOpinion: true, JudgeUnsupported: 0},
+		{CaseID: 3, QID: "zjc-003", HumanVerdict: VerdictHallucinated, JudgeHasOpinion: true, JudgeUnsupported: 0},
+		// 一致的两题: 不算判错
+		{CaseID: 1, QID: "zjc-001", HumanVerdict: VerdictFaithful, JudgeHasOpinion: true, JudgeUnsupported: 0},
+		{CaseID: 2, QID: "zjc-002", HumanVerdict: VerdictHallucinated, JudgeHasOpinion: true, JudgeUnsupported: 1},
+		// "没意见"的题: 人工看不清 / judge 没结论
+		{CaseID: 4, QID: "zjc-004", HumanVerdict: VerdictUnclear, JudgeHasOpinion: true, JudgeUnsupported: 3},
+		{CaseID: 6, QID: "zjc-006", HumanVerdict: VerdictHallucinated, JudgeHasOpinion: false},
+	}
+
+	got := collectDisagreements(items)
+	if len(got) != 3 {
+		t.Fatalf("应有 3 条判错, 实际 %d: %+v", len(got), got)
+	}
+	if got[0].Kind != DisagreementMissed || got[1].Kind != DisagreementMissed {
+		t.Fatalf("漏判要排在前面: %+v", got)
+	}
+	if got[0].CaseID != 3 || got[1].CaseID != 9 {
+		t.Fatalf("同类内按 case_id 稳定排序: %+v", got)
+	}
+	if got[2].Kind != DisagreementFalseAlarm || got[2].CaseID != 5 {
+		t.Fatalf("误报排最后: %+v", got)
+	}
+	if got[0].HumanVerdict != VerdictHallucinated || got[0].JudgeUnsupported != 0 {
+		t.Fatalf("要带上人机两侧的判定依据: %+v", got[0])
+	}
+}
+
+// TestCollectDisagreementsCap 清单最多 50 条: 再多就该去筛 bad case, 而不是在报告里翻页。
+func TestCollectDisagreementsCap(t *testing.T) {
+	items := make([]CalibrationItem, 0, 60)
+	for index := 0; index < 60; index++ {
+		items = append(items, CalibrationItem{
+			CaseID: int64(index + 1), HumanVerdict: VerdictHallucinated,
+			JudgeHasOpinion: true, JudgeUnsupported: 0,
+		})
+	}
+	if got := collectDisagreements(items); len(got) != MaxDisagreements {
+		t.Fatalf("应截断到 %d 条, 实际 %d", MaxDisagreements, len(got))
+	}
+}
+
+// TestComputeCalibrationMissedNote 漏判要单独提示: 这类错会让幻觉流到线上。
+func TestComputeCalibrationMissedNote(t *testing.T) {
+	items := []CalibrationItem{
+		{CaseID: 1, Annotator: "me", HumanVerdict: VerdictHallucinated, JudgeHasOpinion: true, JudgeUnsupported: 0},
+		{CaseID: 2, Annotator: "me", HumanVerdict: VerdictFaithful, JudgeHasOpinion: true, JudgeUnsupported: 1},
+	}
+	report := ComputeCalibration(155, items, CalibrationOptions{TotalCases: 2})
+	if len(report.Disagreements) != 2 {
+		t.Fatalf("两题都不一致: %+v", report.Disagreements)
+	}
+	if !strings.Contains(strings.Join(report.Notes, "\n"), "题是漏判") {
+		t.Fatalf("漏判要单独提示: %v", report.Notes)
+	}
+}
+
 // TestComputeCalibrationOnlyHelpfulness 只标了 helpfulness 时, relevance 不应凭空出现。
 func TestComputeCalibrationOnlyHelpfulness(t *testing.T) {
 	items := []CalibrationItem{
