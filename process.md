@@ -125,8 +125,8 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 | `job_items` | **case 级 checkpoint**（续跑单元） | job_id, case_id, status, retry_count, last_error, result_id |
 | `case_results` | 单 case 评测结果 | run_id, case_id, retrieved jsonb, answer, claims jsonb, judge jsonb, metrics jsonb, latency_ms, tokens jsonb, flags jsonb |
 | `claims` | 答案分解出的原子断言与判定（可用 jsonb 先顶着，量大再拆表） | case_result_id, text, verdict(supported/unsupported/irrelevant), evidence |
-| `annotations` | Bad Case 人工标注 | case_result_id, annotator_id, tag, comment, status(open/fixed/verified) |
-| `human_gold_scores` | 人工金标（校准 judge 用） | case_id, annotator_id, metric, score, jsonb |
+| `annotations` | Bad Case 人工标注（挂在 **run + case** 上，M6 落地） | run_id, case_id, status(open/fixed/verified/wontfix), reason(retrieval/hallucination/generation/dataset/unknown), comment, assignee, created_by；**唯一键 (run_id, case_id)** |
+| `human_gold_scores` | 人工金标（校准 judge 用，M6 落地） | run_id, case_id, annotator, verdict(faithful/hallucinated/unclear), relevance/helpfulness(1–5 可空), note, reviewed；**唯一键 (run_id, case_id, annotator)** |
 | `judge_cache` | judge 输出缓存（省钱） | cache_key_hash, provider/model/prompt_version, output jsonb |
 
 **必须记录的审计字段**：`created_at / updated_at / created_by`（涉及 `runs/cases/annotations` 等所有用户可写表）。
@@ -344,6 +344,24 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 - **为什么计算放 Go**：报告页本来就是 Go 直连，前端要能即时换 run 重看；更要紧的是**统计只有一份实现**，不会出现"CLI 说显著、页面说不显著"。
 - **为什么导出放前端**：接口已经返回结构化结果，三种格式都只是它的视图；服务端再实现一遍等于给自己埋一个"两处口径不一致"的隐患。
 - **为什么不动 `compare_runs.py`**：它是**一致性校验**（故障演练用），跨配置时按设计拒绝 —— 它自己就会提示"请用 M5 的报告工具"。两个工具各管一件事，不抢。
+
+---
+
+### D20 人工标注与金标都挂在 **run** 上，不挂 dataset/case
+
+**决策**：`annotations` 唯一键是 `(run_id, case_id)`，`human_gold_scores` 唯一键是 `(run_id, case_id, annotator)`。两者都记 run，而不是只记 case。
+
+- **为什么**：judge 判的是**某一次 run 产出的那份答案**——换一次 run（top_k / 模型 / 温度变了）答案就变了。拿"题级"金标去校准某次 run 的 judge 输出，比的是两个不同对象；同理，"这题修好了没"也必须指定"相对哪一次 run"。
+- **代价与接受理由**：换 run 要重标，标注成本不跨 run 复用。接受——因为**复用会制造错误结论**，而错误结论比多标一遍贵得多。
+- **annotator 进唯一键**：双人独立打分的意义就是"金标本身可信吗"（M6 校准报告里单独给 inter-annotator agreement）。若系统替人编一个默认标注员，两份打分会被合成一条，双人一致性永远算不出来。
+
+### D21 标注状态机在服务端，字段更新一律"指针语义"
+
+**决策**：`open→fixed→verified` 的流转规则写在 Go（`canTransition`），DB 的 CHECK 只管枚举；所有"可写部分字段"的接口（`PATCH /annotations/:id`、`POST /annotations`、`/human-gold` 的 POST/PATCH）统一 **没传 = 不改，显式空串 = 清空**；分数用 **传 0 = 撤回（置 NULL）** 表示清空。
+
+- **为什么状态机不放 DB 约束**：规则会变（"verified 不能降级"这类业务判断），改规则不该写迁移；而且前端绕不过去——服务端是唯一入口。
+- **为什么要指针语义**：工作台/打分页的交互是"点一下改一个字段"。零值当"没传"会**静默清空**没提交的字段——M6-1 真机踩过一次（只改状态，统计里冒出一批 `unclassified`），`human_gold_scores` 的 upsert 又踩过一次（只改判词，把上次打的分数和备注冲成 NULL/空串，校准样本凭空消失）。两次都是"接口调用方看不出异常"的那种坏。因此 upsert 冲突时按 `COALESCE(EXCLUDED.x, 原值)` **合并**，而不是整行覆盖。
+- **为什么分数要能撤回**：合法分数是 1–5，0 不是分数——正好可以拿 0 当"清空"信号。否则打错一个分只能删整条记录重来，连带把 verdict 一起丢掉。
 
 ---
 
@@ -573,15 +591,49 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 ### M6 Bad Case 标注与金标校准闭环
 
 **任务清单**
-- [ ] 标注工作台：从报告/flag 过滤进入 → 打标签 + 评论 + 状态流转 `open→fixed→verified`（annotations 表）
-- [ ] "bad case → 归因建议"：自动给出检索/幻觉/生成建议（基于 flag 与 judge 判定），人工确认或纠正
-- [ ] 人工金标集流程：从评测集选 30–50 题，双人/单人 + 复核打分入 `human_gold_scores`
-- [ ] **judge 校准报告**：自动评测 vs 人工金标的一致性（κ / 一致率 / 混淆），暴露 judge prompt 缺陷
-- [ ] 迭代闭环支撑：改 profile 配置 → 重跑 → 对比"上一版 vs 这一版"中已标 fixed 的 case 是否变好
-- [ ] 前端：标注面板（快捷键友好）、金标打分页、校准报告视图
-- [ ] 测试：标注状态机、校准指标计算、闭环对比查询
+- [x] 标注工作台：从报告/flag 过滤进入 → 打标签 + 评论 + 状态流转 `open→fixed→verified`（annotations 表；M6-1 后端 + M6-2 前端）
+- [x] "bad case → 归因建议"：自动给出检索/幻觉/生成建议（基于 flag 与 judge 判定），人工确认或纠正（`/annotation-suggestion`：`flags[0]` 即主因 D16；无判定时拒绝给"幻觉"结论）
+- [x] 人工金标集流程：从评测集选 30–50 题，双人/单人 + 复核打分入 `human_gold_scores`（M6-3a 后端 + M6-3b 打分页；`reviewed` 复核标记 + 复核比例进报告）
+- [x] **judge 校准报告**：自动评测 vs 人工金标的一致性（κ / 一致率 / 混淆矩阵 / MAE / 均值偏差 / 人工间一致性），并自曝"样本<20 / 覆盖率<50% / 单人未复核"三类不可信条件
+- [x] 迭代闭环支撑：改 profile 配置 → 重跑 → 对比"上一版 vs 这一版"中已标 fixed 的 case 是否变好（M6-4：`GET /closure` + 闭环页，闭环页可直接"改配置重跑"并一键销单）
+- [x] 前端：标注面板（快捷键友好）、金标打分页、校准报告视图、闭环页
+- [x] 测试：标注状态机、校准指标计算（κ 手算样例/混淆矩阵/边界）、闭环对比查询（五种结局/状态矩阵/护栏）
 
-**验收标准**：完整 demo —— 发现一批 bad case → 打标归类 → 改配置重跑 → 报告显示该批指标回升且对应 case 状态推进到 verified。
+**验收标准**：完整 demo —— 发现一批 bad case → 打标归类 → 改配置重跑 → 报告显示该批指标回升且对应 case 状态推进到 verified。✅ **已达成（代码与真机核对均通过；人工标注/金标数据由使用者在界面里产出，见下方小结第 2 条）**
+
+**M6 完成小结（2026-09-17）**
+
+**1. 交付物（六个子批次，全部已提交）**
+
+| 批次 | 内容 | commit |
+|------|------|--------|
+| M6-1 | `annotations` 表 + 状态机 + 统计 + 归因建议（6 个端点） | `81565a4` |
+| M6-2 | 标注工作台（快捷键 1-5/n/b、归因建议采纳、状态流转、评论） | `81565a4` |
+| M6-3a | `human_gold_scores` 表 + κ/MAE/混淆矩阵/人工间一致性 + 5 个端点 | `81565a4` |
+| M6-3b | 金标打分页（1/2/3 判词、judge 断言并排、按需取上下文正文、星级后补、复核标记） | `e9d9574` |
+| M6-4 | 标注闭环报告 + 闭环页（五种结局、销单清单、**改配置重跑**对话框） | `5972488` / `e9d9574` |
+| 收口 | 本轮补齐：闭环状态矩阵、`reviewed` 复核信号、重跑入口、文档 D20/D21 | 本 commit |
+
+**2. 真机核对（数字都是跑出来的）**
+
+- **闭环正向**：run #112（k=1）上把 3 道 `retrieval_miss` 标成 fixed → `GET /closure?baseline=112&candidate=100` 报 `improved=3 / eligible_for_verify=3`，证据 `recall 0% → 100%`、`MRR@k 0% → 50%`；`PATCH /annotations/:id {"status":"verified"}` 销单成功，再想改回 fixed 被 409 拦住（状态机生效）。
+- **状态矩阵**（本轮补齐）：同一批题分别标成 `fixed / verified / wontfix`，闭环给出三句不同的话——「可销单」/「这条已经验证过了, 不用重复销单」/「当时判为不修(wontfix), 但这次确实变好了: 可以改成 verified」。含糊的"还不能销单"等于没给结论。
+- **护栏**：#100 vs #111（同为 `4e767020`）→ `same_config=true`，报告第一句就是"这是复现而不是实验"；`baseline=100 → candidate=112` 反向对比时同一道题报 `worsened`；候选 run 未做归因时整体降级为不可判断并给出 `make attribution RUN=<id> APPLY=1`。
+- **校准与复核**：打分页 ✔ 复核开关 → `PATCH /human-gold/:id {"reviewed":true}` → `GET /judge-calibration` 的 `gold_reviewed` 从 0 变 1，并新增提示「有 1/1 道金标经过复核」；零复核且样本 ≥20 题时改为提示「建议至少抽 20% 双人复核, 否则 κ 只是一个人 vs judge 的口径」。
+- **改配置重跑**（M6 验收的中间一环）：从 run #112 的 `config_snapshot` 预填、只把 `top_k` 1→3，提交得 **run #156**（60 题、`config_hash=022705e7`、快照里 `retrieval.top_k=3` 且无 `generation`/`judge` 段、数据来源沿用 dataset 4 / corpus 4），闭环侧 `same_config=false`。这一步以前只能手写 curl，参数记错一个就变成另一场实验。
+- **测试**：worker `292 passed / 20 skipped`；Go 四包 ok；web **171 passed**（M6 净增 68 条：标注 16 + 校准 25 + 闭环 26 + 重跑 17，含 κ 教科书样例 0.6、混淆矩阵逐格、`evidenceHighlights` 优先级、`formFromRunSnapshot` 的错类型字段）。
+
+**3. 两条踩坑记录（都已用测试钉住）**
+
+- **"没传" ≠ "清空"**：第一次真机冒烟就发现 `POST /human-gold` 只带判词时，`COALESCE` 之前的整行覆盖把上次的分数与备注冲成 NULL/空串——**校准样本凭空少了几对而接口调用方看不出异常**。改成 `COALESCE(EXCLUDED.x, 原值)` 合并语义 + 一条守卫测试；`PATCH` 侧再补"传 0 = 撤回分数"（1–5 之外的值正好空出来当清空信号）。
+- **"变好"的定义只能有一份**：闭环要把题推进到 `verified`，如果它自己再写一遍判定，迟早出现「对比页说修好了、闭环页说没修好」。于是把 A/B 里的标签转移抽成 `eval.FlagTransition`，两处共用（`/compare` 的 Fixed/Broke/Changed 与闭环的 improved/worsened/changed 同源）。
+
+**4. 未做/转出**
+
+- **人工数据必须由人产出**：`annotations` 与 `human_gold_scores` 目前都是 0 行（冒烟数据已清理，我不用"机器代替人工"的方式造校准结论）。校准报告现在显示空态「还没有人工金标: 先去打分页挑 30–50 题判一遍」——这是设计上正确的空态，不是缺陷。
+- **run #156 已入队**（`top_k=3`、只跑检索、无 LLM 生成/判定费用，`make worker` 即可跑完）：跑完可在闭环页直接验证"把 k 从 1 提到 3 之后那 3 道漏召回是否修好"，这是 M6 验收最省事的一条真实数据。
+- **生成侧闭环仍缺正向案例**：现有 A/B 只有 `k=1 vs k=5`（纯检索）。要演示「幻觉的根因是检索」，仍需一次 `k=1 + 生成 + 判定` 的 run 与 #155 对比（约 120k tokens，可选）。
+- **D20/D21 之外的取舍**：标注不挂 dataset（D20）意味着换 run 要重标；本轮接受该成本，若将来标注量上来，可考虑"从旧 run 复制标注"的辅助功能（明确标为"建议值"，仍需人确认）。
 
 ---
 
@@ -639,7 +691,8 @@ eval-platform/
 
 - 每个任务卡 = 一次改动；**先写/改测试 → 全绿 → 一个 commit**。
 - commit message 规范：`<type>: <subject>`，type ∈ feat/fix/refactor/test/docs/chore；必要时正文说明动机。
-- 里程碑完成 = 该节任务全勾 + 验收 demo 可跑 + 更新 process.md（勾选/记录偏差/新增 ADR）+ 一个 docs commit。
+- 里程碑完成 = 该节任务全勾 + 验收 demo 可跑 + 更新 process.md（勾选/记录偏差/新增 ADR）+ 一个 docs commit + 一个 tag（`v0.x.0-m<里程碑>`）。
+- tag 现状：`v0.1.0-m0` / `v0.2.0-m2` / `v0.3.0-m3` 已有；**M4 与 M5 的收尾落在同一个 commit（`6b8aedc` A/B对照，M4-4.1 与 M5-1/M5-2 一起进来），因此 `v0.4.0-m4` 与 `v0.5.0-m5` 指向同一个 commit**；M6 的 tag 待 M6 收口 commit 打上。
 - 依赖注入与配置不写死；所有 secret 走 `.env`。
 
 ---
