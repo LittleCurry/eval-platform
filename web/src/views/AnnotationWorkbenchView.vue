@@ -28,6 +28,7 @@ import {
 import { getRunCaseResults, listRuns } from '../api/runs'
 import type { Annotation, AnnotationStats, AnnotationSuggestion, Run, RunCaseResult } from '../api/types'
 import { flagLabel, primaryFlag } from '../utils/report'
+import { usePermission } from '../composables/usePermission'
 import { formatPercent, shortHash } from '../utils/format'
 import {
   REASONS,
@@ -49,6 +50,8 @@ import {
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+// M7-3: 只读账号能看不能改 —— 按钮禁用而不是让他点到 403 才发现
+const { canWrite } = usePermission()
 
 const runs = ref<Run[]>([])
 const runId = ref<number | null>(route.query.run ? Number(route.query.run) : null)
@@ -154,6 +157,7 @@ async function upsert(payload: { status?: string; reason?: string; comment?: str
 }
 
 async function markReason(reason: string) {
+  if (!canWrite.value) return
   // 第一次打标自动开单(open), 之后的 reason 修改沿用当前状态
   const current = selected.value?.annotation?.status
   await upsert(current ? { reason } : { status: 'open', reason })
@@ -161,6 +165,7 @@ async function markReason(reason: string) {
 }
 
 async function markStatus(status: string) {
+  if (!canWrite.value) return
   await upsert({ status })
   if (status === 'verified') next() // 验证完就走, 这是工作台的主循环
 }
@@ -347,6 +352,7 @@ function onRowProps(row: AnnotationRow) {
                   size="small"
                   :type="selected.annotation?.reason === reason ? 'primary' : 'default'"
                   :loading="saving"
+                  :disabled="!canWrite"
                   @click="markReason(reason)"
               >
                 {{ index + 1 }} {{ reasonLabel(reason) }}
@@ -363,6 +369,7 @@ function onRowProps(row: AnnotationRow) {
                   size="small"
                   :type="statusTagType(status)"
                   :loading="saving"
+                  :disabled="!canWrite"
                   @click="markStatus(status)"
               >
                 {{ statusLabel(status) }}
@@ -377,7 +384,9 @@ function onRowProps(row: AnnotationRow) {
                 style="margin-bottom: 8px"
             />
             <NSpace justify="end">
-              <NButton size="small" :loading="saving" @click="saveComment">保存评论</NButton>
+              <NButton size="small" :loading="saving" :disabled="!canWrite" @click="saveComment">
+                保存评论
+              </NButton>
               <NButton size="small" type="primary" quaternary @click="next">下一题 (n)</NButton>
             </NSpace>
           </template>

@@ -20,6 +20,7 @@ import {
 } from 'naive-ui'
 import { initSession, signOut, useSession } from '../composables/useSession'
 import { useProject } from '../composables/useProject'
+import { usePermission } from '../composables/usePermission'
 import { roleLabel, roleTagType } from '../utils/session'
 import { switchNotice } from '../utils/projectContext'
 import { NAV_TREE, activeNavKey, visibleNav } from '../utils/navigation'
@@ -29,6 +30,7 @@ const router = useRouter()
 const message = useMessage()
 const session = useSession()
 const project = useProject()
+const { readOnlyHint } = usePermission()
 
 // 菜单清单与"哪些项该隐藏"都在 utils/navigation.ts(纯数据 + 双向对照路由的测试)。
 // 这里只做一件事: 把可见项翻成 naive-ui 的 MenuOption。
@@ -189,6 +191,15 @@ function onSelect(key: string) {
     </NLayoutHeader>
 
     <NLayoutContent content-style="padding: 24px; max-width: 1200px; margin: 0 auto">
+      <!-- 只读账号: 一进页面就说清"能看不能改", 而不是让他点到 403 才发现(M7-3) -->
+      <NAlert
+          v-if="readOnlyHint"
+          type="info"
+          :show-icon="false"
+          style="margin-bottom: 16px"
+      >
+        <NText style="font-size: 12px">{{ readOnlyHint }}</NText>
+      </NAlert>
       <RouterView />
     </NLayoutContent>
 

@@ -17,10 +17,12 @@ import {
 import { createDataset, deleteDataset, listDatasets } from '../api/datasets'
 import type { Dataset } from '../api/types'
 import { currentProjectId, useProject } from '../composables/useProject'
+import { usePermission } from '../composables/usePermission'
 
 const router = useRouter()
 const message = useMessage()
 const { hasProjects, emptyHint } = useProject()
+const { canWrite, canDelete } = usePermission()
 
 const datasets = ref<Dataset[]>([])
 const loading = ref(false)
@@ -102,7 +104,11 @@ const columns: DataTableColumns<Dataset> = [
             h(NButton, { size: 'small', onClick: () => router.push(`/datasets/${row.id}`) }, { default: () => '管理用例' }),
             h(
                 NButton,
-                { size: 'small', type: 'error', quaternary: true, onClick: () => onDelete(row) },
+                {
+                  size: 'small', type: 'error', quaternary: true,
+                  // 删数据集(连用例)不可逆: 只给管理员
+                  disabled: !canDelete.value, onClick: () => onDelete(row),
+                },
                 { default: () => '删除' },
             ),
           ],
@@ -114,13 +120,13 @@ const columns: DataTableColumns<Dataset> = [
 <template>
   <NCard title="数据集">
     <template #header-extra>
-      <NButton type="primary" @click="showCreate = true">新建数据集</NButton>
+      <NButton type="primary" :disabled="!canWrite" @click="showCreate = true">新建数据集</NButton>
     </template>
 
       <NAlert v-if="!hasProjects" type="info" :show-icon="false" style="margin-bottom: 12px">
         {{ emptyHint }}
       </NAlert>
-    <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">
+    <NAlert v-if="errorText && datasets.length > 0" type="error" :show-icon="false" style="margin-bottom: 12px">
       {{ errorText }}
     </NAlert>
 
@@ -143,7 +149,7 @@ const columns: DataTableColumns<Dataset> = [
           </NFormItem>
           <NSpace justify="end">
             <NButton @click="showCreate = false">取消</NButton>
-            <NButton type="primary" @click="submitCreate">创建</NButton>
+            <NButton type="primary" :disabled="!canWrite" @click="submitCreate">创建</NButton>
           </NSpace>
         </NForm>
       </NCard>

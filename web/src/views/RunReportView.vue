@@ -11,6 +11,7 @@ import {
   NDescriptions,
   NDescriptionsItem,
   NDrawer,
+  NDropdown,
   NDrawerContent,
   NGi,
   NGrid,
@@ -39,6 +40,9 @@ import {
 } from '../utils/format'
 import {
   answerSnippet,
+  buildReportCsv,
+  buildReportMarkdown,
+  reportExportFilename,
   attributionText,
   claimLabel,
   claimCounter,
@@ -63,6 +67,40 @@ const runId = computed(() => Number(route.params.id))
 // M5-1: "和哪次 run 对比" —— 同评测集的 run 优先, 免得选到不可比的组合
 const allRuns = ref<Run[]>([])
 const compareTarget = ref<number | null>(null)
+// M7-3: 导出下拉(CSV 给"拿数据的人", Markdown 给"贴文档/群里的人")
+const exportOptions = [
+  { label: '导出 CSV（含逐题明细）', key: 'csv' },
+  { label: '导出 Markdown（贴文档/群里）', key: 'md' },
+]
+
+/**
+ * 下载用 Blob + a[download], 不经过服务端 —— 报告接口已经返回结构化结果,
+ * 导出只是它的另一种视图(D19: 计算在 Go, 格式化在前端, 不写第二遍口径)。
+ */
+function download(name: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function onExport(key: string) {
+  if (!report.value) return
+  if (key === 'csv') {
+    download(reportExportFilename(report.value.run.id, 'csv'), buildReportCsv(report.value), 'text/csv')
+    message.success('已导出 CSV')
+    return
+  }
+  if (key === 'md') {
+    download(reportExportFilename(report.value.run.id, 'md'), buildReportMarkdown(report.value), 'text/markdown')
+    message.success('已导出 Markdown')
+  }
+}
 
 const report = ref<RunReport | null>(null)
 const progressInfo = ref<RunProgress | null>(null)
@@ -468,6 +506,9 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
               style="width: 260px"
               @update:value="openCompare"
           />
+          <NDropdown v-if="report" :options="exportOptions" @select="onExport">
+            <NButton size="small" quaternary>导出报告</NButton>
+          </NDropdown>
           <NButton
               v-if="flagEntries.length"
               size="small"

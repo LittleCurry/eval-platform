@@ -8,7 +8,9 @@ import type {
     GenerationPayload,
     JudgePayload,
     RetrievedItem,
+    RunCaseResult,
     RunMetrics,
+    RunReport,
 } from '../api/types'
 import type { TagType } from './format'
 
@@ -217,4 +219,184 @@ export function contextNotice(response?: CaseContextResponse | null): string | n
         return `${missing}/${chunks.length} 条 chunk 正文缺失（该 point 不在当前集合里，索引可能被重建过）`
     }
     return null
+}
+
+// ---- 报告导出(M7-3) ----
+//
+// 为什么导出放前端而不是服务端: 报告接口已经返回结构化结果, CSV/Markdown 只是它的视图;
+// 服务端再实现一遍等于给自己埋一个"两处口径不一致"的隐患(与 D19 同一条理由)。
+// 这里复用 A/B 对比页那套 CSV 转义约定, 避免同一个仓库里出现两种 CSV 风格。
+
+function csvCell(value: unknown): string {
+    const text = value === undefined || value === null ? '' : String(value)
+    if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`
+    return text
+}
+
+function csvRows(rows: unknown[][]): string {
+    return rows.map((row) => row.map(csvCell).join(',')).join('\n')
+}
+
+/** run 级指标的中文名(与报告页卡片一致, 免得导出文件里全是英文 key)。 */
+const METRIC_LABELS: Record<string, string> = {
+    recall_at_k: 'Recall@k',
+    precision_at_k: 'Precision@k',
+    mrr_at_k: 'MRR@k',
+    hit_at_k: 'Hit@k',
+    avg_hits: '平均命中数',
+    avg_gold_chunks: '平均 gold 数',
+    cases_total: '题目总数',
+    cases_evaluated: '参与评测题数',
+    cases_skipped_no_gold: '因缺 gold 跳过',
+    answers_generated: '生成答案题数',
+    cases_judged: '判定题数',
+    claim_support_rate: '断言支持率',
+    claim_support_rate_raw: '(未舍入)断言支持率',
+    hallucination_rate: '幻觉率',
+    irrelevant_rate: '无关断言率',
+    claims_total: '断言总数',
+    claims_supported: '有据断言数',
+    claims_unsupported: '无据断言数',
+    claims_irrelevant: '无关断言数',
+    avg_claims_per_answer: '平均断言数',
+    relevance_avg: 'relevance 均值',
+    helpfulness_avg: 'helpfulness 均值',
+    rubric_cases: '打分题数',
+    judge_cache_hits: 'judge 缓存命中',
+    judge_prompt_tokens: 'judge prompt tokens',
+    judge_completion_tokens: 'judge completion tokens',
+    prompt_tokens: '生成 prompt tokens',
+    completion_tokens: '生成 completion tokens',
+}
+
+export function metricLabel(name: string): string {
+    return METRIC_LABELS[name] ?? name
+}
+
+/**
+ * 导出 CSV: 四段(概况 / 指标 / 归因标签 / 逐题明细)。
+ *
+ * 逐题明细里带上"主因 + 断言计数 + 答案摘要"——同事拿这个文件就能自己核对,
+ * 不必再回来点开页面; 答案正文按摘要截断(完整答案在页面抽屉里看)。
+ */
+export function buildReportCsv(report: RunReport): string {
+    const run = report.run
+    const metrics = report.metrics ?? {}
+    const blocks: string[] = []
+
+    blocks.push(csvRows([
+        ['run', run.id],
+        ['评测集', run.dataset_id],
+        ['状态', run.status],
+        ['config_hash', run.config_hash],
+        ['git_sha', run.git_sha],
+        ['开始', run.started_at ?? ''],
+        ['结束', run.finished_at ?? ''],
+    ]))
+
+    blocks.push(csvRows([
+        ['指标', '值'],
+        ...Object.keys(metrics)
+            .filter((key) => !key.startsWith('attribution'))
+            .sort()
+            .map((key) => [metricLabel(key), typeof metrics[key] === 'object' ? JSON.stringify(metrics[key]) : metrics[key]]),
+    ]))
+
+    const flagCounts = Object.entries(report.flag_counts ?? {}).sort((a, b) => b[1] - a[1])
+    if (flagCounts.length > 0) {
+        blocks.push(csvRows([
+            ['归因标签', '题数'],
+            ...flagCounts.map(([flag, count]) => [flagLabel(flag), count]),
+        ]))
+    }
+
+    blocks.push(csvRows([
+        ['qid', '主因', '断言(支持/无据/无关)', 'recall', 'MRR', '命中', '答案摘要'],
+        ...(report.worst_cases ?? []).map((row) => [
+            row.qid,
+            flagLabel(primaryFlag(row.flags) ?? '') || '—',
+            claimCounterText(row),
+            row.metrics?.recall ?? '',
+            row.metrics?.reciprocal_rank ?? '',
+            row.metrics?.hit ?? '',
+            answerSnippet(row.answer, 60) ?? '',
+        ]),
+    ]))
+
+    return blocks.join('\n\n')
+}
+
+function claimCounterText(row: RunCaseResult): string {
+    // claimCounter 在"没有判定/断言为空"时返回 null —— 那时显示 — 而不是 0/0/0,
+    // 否则导出文件会把"没判定"读成"零断言"
+    const counter = claimCounter(row.judge)
+    if (!counter) return '—'
+    return `${counter.supported}/${counter.unsupported}/${counter.irrelevant}`
+}
+
+/**
+ * 导出 Markdown: 给人看的版本(贴到文档/群里)。
+ * 与 CSV 的区别不是格式, 而是**取舍**: 这里只放"结论级"内容(指标卡 + 主因分布),
+ * 不铺逐题明细 —— 明细留给 CSV。
+ */
+export function buildReportMarkdown(report: RunReport, now = new Date()): string {
+    const run = report.run
+    const metrics = report.metrics ?? {}
+    const lines: string[] = []
+
+    lines.push(`# run #${run.id} 评测报告`)
+    lines.push('')
+    lines.push(`- 评测集: dataset ${run.dataset_id}${run.corpus_id ? ` · corpus ${run.corpus_id}` : ''}`)
+    lines.push(`- 状态: ${run.status}`)
+    lines.push(`- config_hash: \`${run.config_hash}\` · git_sha: \`${run.git_sha}\``)
+    lines.push(`- 生成时间: ${now.toISOString()}`)
+    lines.push('')
+
+    const rate = (value: unknown) =>
+        typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '—'
+    lines.push('## 指标')
+    lines.push('')
+    lines.push('| 指标 | 值 |')
+    lines.push('| --- | --- |')
+    for (const key of ['recall_at_k', 'precision_at_k', 'mrr_at_k', 'hit_at_k']) {
+        if (metrics[key] !== undefined) lines.push(`| ${metricLabel(key)} | ${rate(metrics[key])} |`)
+    }
+    if (hasLlmMetrics(metrics)) {
+        lines.push('')
+        lines.push('## 生成与判定')
+        lines.push('')
+        lines.push('| 指标 | 值 |')
+        lines.push('| --- | --- |')
+        lines.push(`| 幻觉率 | ${rate(metrics.hallucination_rate)} |`)
+        lines.push(`| 断言支持率 | ${rate(metrics.claim_support_rate)} |`)
+        lines.push(`| 无关断言率 | ${rate(metrics.irrelevant_rate)} |`)
+        lines.push(`| 判定题数 | ${metrics.cases_judged ?? '—'} |`)
+    }
+
+    const attribution = attributionText(metrics)
+    if (attribution) {
+        lines.push('')
+        lines.push(`> 归因口径: ${attribution}`)
+    }
+
+    const flagCounts = Object.entries(report.flag_counts ?? {}).sort((a, b) => b[1] - a[1])
+    if (flagCounts.length > 0) {
+        lines.push('')
+        lines.push('## 归因标签分布')
+        lines.push('')
+        for (const [flag, count] of flagCounts) {
+            lines.push(`- ${flagLabel(flag)}: ${count}`)
+        }
+    }
+
+    lines.push('')
+    lines.push(`> 逐题明细（含每题的断言与答案摘要）见同目录的 CSV 导出。`)
+    return lines.join('\n')
+}
+
+/** 导出文件名: 与 A/B 对比页同一套命名习惯。 */
+export function reportExportFilename(runId: number, ext: string, now = new Date()): string {
+    const pad = (value: number) => String(value).padStart(2, '0')
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+    return `run-${runId}-report-${stamp}.${ext}`
 }

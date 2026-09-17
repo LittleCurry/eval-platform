@@ -27,6 +27,7 @@ import { listPipelineProfiles, previewPipeline } from '../api/pipelineProfiles'
 import type { Annotation, ClosureRecord, ClosureReport, PipelineProfile, Run } from '../api/types'
 import { shortHash } from '../utils/format'
 import { metricLabel } from '../utils/compare'
+import { usePermission } from '../composables/usePermission'
 import { configToForm, type ProfileForm } from '../utils/profile'
 import { describeChanges, formFromRunSnapshot, formToRunPayload, rerunGuard, sourceFromRunSnapshot } from '../utils/rerun'
 import { statusLabel, statusTagType } from '../utils/annotation'
@@ -37,6 +38,8 @@ import { flagsText, evidenceText, evidenceHighlights, closureActionText, closure
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+// M7-3: 销单与重跑都是写操作
+const { canWrite, canSubmit } = usePermission()
 
 const runs = ref<Run[]>([])
 const baselineId = ref<number | null>(route.query.baseline ? Number(route.query.baseline) : null)
@@ -297,8 +300,11 @@ const columns: DataTableColumns<ClosureRecord> = [
         default: () => [
           h(NTag, { size: 'small', type: hint.type }, { default: () => hint.text }),
           row.eligible_for_verify
-              ? h(NButton, { size: 'tiny', type: 'primary', quaternary: true, onClick: () => markVerified(row) },
-                  { default: () => '标记已修好' })
+              ? h(NButton, {
+                    size: 'tiny', type: 'primary', quaternary: true,
+                    disabled: !canWrite.value,
+                    onClick: () => markVerified(row),
+                  }, { default: () => '标记已修好' })
               : null,
         ],
       })
@@ -359,12 +365,13 @@ const columns: DataTableColumns<ClosureRecord> = [
       <NSpace align="center" justify="space-between" style="margin-top: 14px">
         <NText style="font-size: 13px">{{ summaryLine }}</NText>
         <NSpace align="center">
-          <NButton size="small" @click="openRerun">改配置重跑</NButton>
+          <NButton size="small" :disabled="!canSubmit" @click="openRerun">改配置重跑</NButton>
           <NButton
               v-if="eligibleCount > 0"
               size="small"
               type="primary"
               :loading="verifying"
+              :disabled="!canWrite"
               @click="verifyAll"
           >
             一键验证这 {{ eligibleCount }} 题
@@ -474,7 +481,7 @@ const columns: DataTableColumns<ClosureRecord> = [
       <template #footer>
         <NSpace justify="end">
           <NButton size="small" @click="showRerun = false">关闭</NButton>
-          <NButton size="small" type="primary" :loading="submitting" :disabled="!rerunForm" @click="doSubmit">
+          <NButton size="small" type="primary" :loading="submitting" :disabled="!rerunForm || !canSubmit" @click="doSubmit">
             提交重跑
           </NButton>
         </NSpace>

@@ -28,10 +28,13 @@ import {
 } from '../api/corpora'
 import type { Corpus, Document } from '../api/types'
 import { currentProjectId, useProject } from '../composables/useProject'
+import { usePermission } from '../composables/usePermission'
+import AsyncState from '../components/AsyncState.vue'
 
 const message = useMessage()
 // M7-2: 当前项目来自真实项目列表(不再是写死的 1)
 const { hasProjects, emptyHint } = useProject()
+const { canWrite, canDelete } = usePermission()
 
 const corpora = ref<Corpus[]>([])
 const loading = ref(false)
@@ -166,7 +169,11 @@ const corpusColumns: DataTableColumns<Corpus> = [
             h(NButton, { size: 'small', onClick: () => openDocuments(row) }, { default: () => '文档' }),
             h(
                 NButton,
-                { size: 'small', type: 'error', quaternary: true, onClick: () => onDeleteCorpus(row) },
+                {
+                  size: 'small', type: 'error', quaternary: true,
+                  // 删语料库(连文档)不可逆: 只给管理员
+                  disabled: !canDelete.value, onClick: () => onDeleteCorpus(row),
+                },
                 { default: () => '删除' },
             ),
           ],
@@ -185,7 +192,10 @@ const docColumns: DataTableColumns<Document> = [
     render: (row) =>
         h(
             NButton,
-            { size: 'small', type: 'error', quaternary: true, onClick: () => onDeleteDocument(row.id) },
+            {
+              size: 'small', type: 'error', quaternary: true,
+              disabled: !canDelete.value, onClick: () => onDeleteDocument(row.id),
+            },
             { default: () => '删除' },
         ),
   },
@@ -195,23 +205,31 @@ const docColumns: DataTableColumns<Document> = [
 <template>
   <NCard title="语料库">
     <template #header-extra>
-      <NButton type="primary" @click="showCreate = true">新建语料库</NButton>
+      <NButton type="primary" :disabled="!canWrite" @click="showCreate = true">新建语料库</NButton>
     </template>
 
       <NAlert v-if="!hasProjects" type="info" :show-icon="false" style="margin-bottom: 12px">
         {{ emptyHint }}
       </NAlert>
-    <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">
+    <NAlert v-if="errorText && corpora.length > 0" type="error" :show-icon="false" style="margin-bottom: 12px">
       {{ errorText }}
     </NAlert>
 
-    <NDataTable
-        :columns="corpusColumns"
-        :data="corpora"
-        :loading="loading"
-        :row-key="(row: Corpus) => row.id"
-        size="small"
-    />
+    <AsyncState
+        :loading="loading && corpora.length === 0"
+        :error="corpora.length === 0 ? errorText : ''"
+        :empty="!loading && corpora.length === 0 && !errorText && hasProjects"
+        empty-text="这个项目下还没有语料库：点右上角「新建语料库」上传资料"
+        @retry="load"
+    >
+      <NDataTable
+          :columns="corpusColumns"
+          :data="corpora"
+          :loading="loading"
+          :row-key="(row: Corpus) => row.id"
+          size="small"
+      />
+    </AsyncState>
 
     <NModal v-model:show="showCreate">
       <NCard style="width: 480px" title="新建语料库" :bordered="false" size="huge" role="dialog">
@@ -231,7 +249,7 @@ const docColumns: DataTableColumns<Document> = [
           </NFormItem>
           <NSpace justify="end">
             <NButton @click="showCreate = false">取消</NButton>
-            <NButton type="primary" @click="submitCreate">创建</NButton>
+            <NButton type="primary" :disabled="!canWrite" @click="submitCreate">创建</NButton>
           </NSpace>
         </NForm>
       </NCard>
@@ -269,7 +287,7 @@ const docColumns: DataTableColumns<Document> = [
               </NFormItem>
               <NSpace justify="end">
                 <NButton @click="showUpload = false">取消</NButton>
-                <NButton type="primary" @click="submitUpload">上传</NButton>
+                <NButton type="primary" :disabled="!canWrite" @click="submitUpload">上传</NButton>
               </NSpace>
             </NForm>
           </NCard>

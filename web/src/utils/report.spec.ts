@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { CaseContextResponse, JudgePayload, RunMetrics } from '../api/types'
+import type { CaseContextResponse, JudgePayload, RunMetrics, RunReport } from '../api/types'
 import {
     answerSnippet,
+    buildReportCsv,
+    buildReportMarkdown,
+    reportExportFilename,
     attributionText,
     claimCounter,
     contextNotice,
@@ -274,5 +277,132 @@ describe('contextNotice', () => {
 
     it('空 chunk 列表不算异常(该题没有检索结果)', () => {
         expect(contextNotice(response({ chunks: [] }))).toBeNull()
+    })
+})
+
+// ---- 报告导出(M7-3) ----
+
+function sampleMetrics(): RunMetrics {
+    const metrics: RunMetrics = {
+        recall_at_k: 0.948611, precision_at_k: 0.2, mrr_at_k: 0.9, hit_at_k: 1,
+        hallucination_rate: 0, claim_support_rate: 1, irrelevant_rate: 0,
+        cases_judged: 60, cases_total: 60,
+    }
+    metrics.attribution = {
+        version: 1, scope: 'retrieval+judge', k: 5,
+        low_rank_limit: 3, low_rank_ratio: 0.5, quality_line: 3,
+    }
+    return metrics
+}
+
+function sampleReport(): RunReport {
+    return {
+        run: {
+            id: 155, project_id: 1, dataset_id: 4, corpus_id: 4, status: 'succeeded',
+            config_hash: '449ca546', git_sha: '569d393', metrics: {},
+            created_at: '2026-09-17T10:00:00Z', started_at: '2026-09-17T10:00:00Z',
+            finished_at: '2026-09-17T10:05:00Z',
+        },
+        metrics: sampleMetrics(),
+        worst_cases: [
+            {
+                case_id: 61, qid: 'zjc-027', question: '签名失败怎么处理？',
+                retrieved: [], metrics: { recall: 0.5, reciprocal_rank: 0.2, hit: 1 },
+                flags: ['retrieval_low_rank'],
+                answer: '失败后按指数退避重试三次，间隔 5s / 30s / 5min。',
+                judge: {
+                    claims: [
+                        { id: 1, text: '间隔 5s', label: 'supported' },
+                        { id: 2, text: '重试 3 次', label: 'unsupported' },
+                    ],
+                    rubric: null, meta: {},
+                },
+            },
+            {
+                case_id: 62, qid: 'zjc-028', question: '导入格式？',
+                retrieved: [], metrics: { recall: 0, reciprocal_rank: 0, hit: 0 },
+                flags: [], answer: '支持 .xlsx 与 .csv。',
+            },
+        ],
+        flag_counts: { retrieval_low_rank: 1, hallucination: 2 },
+    }
+}
+
+describe('buildReportCsv', () => {
+    it('四段都在: 概况 / 指标 / 归因标签 / 逐题明细', () => {
+        const csv = buildReportCsv(sampleReport())
+        expect(csv).toContain('run,155')
+        expect(csv).toContain('config_hash,449ca546')
+        expect(csv).toContain('Recall@k,0.948611')
+        expect(csv).toContain('命中但排序靠后,1')
+        expect(csv).toContain('zjc-027')
+    })
+
+    it('指标名翻译成中文, 陌生 key 原样保留(不吞信息)', () => {
+        const csv = buildReportCsv(sampleReport())
+        expect(csv).toContain('幻觉率')
+        expect(csv).not.toContain('hallucination_rate,')
+        const weird = sampleReport()
+        weird.metrics = { brand_new_metric: 0.5 }
+        expect(buildReportCsv(weird)).toContain('brand_new_metric,0.5')
+    })
+
+    it('归因口径(对象)不进指标列表 —— 它是解释信息, 不是指标', () => {
+        expect(buildReportCsv(sampleReport())).not.toContain('"version":1')
+    })
+
+    it('逐题明细带主因与断言计数, 答案按摘要截断', () => {
+        const csv = buildReportCsv(sampleReport())
+        expect(csv).toContain('断言(支持/无据/无关)')
+        expect(csv).toContain('1/1/0')        // zjc-027: 1 支持 / 1 无据 / 0 无关
+        const row = csv.split('\n').find((line) => line.startsWith('zjc-027'))
+        expect(row).toBe('zjc-027,命中但排序靠后,1/1/0,0.5,0.2,1,失败后按指数退避重试三次，间隔 5s / 30s / 5min。')
+    })
+
+    it('含逗号/引号的答案被正确转义(否则 Excel 里会串列)', () => {
+        const report = sampleReport()
+        report.worst_cases[0].answer = '顺序是 "先重试, 再降级"'
+        const csv = buildReportCsv(report)
+        expect(csv).toContain('"顺序是 ""先重试, 再降级"""')
+    })
+
+    it('没有判定的题断言计数显示 —, 不假装是 0/0/0', () => {
+        const csv = buildReportCsv(sampleReport())
+        const lines = csv.split('\n')
+        const row = lines.find((line) => line.startsWith('zjc-028'))
+        expect(row).toContain('—')
+    })
+})
+
+describe('buildReportMarkdown', () => {
+    it('只放结论级内容: 指标 + 生成判定 + 归因分布', () => {
+        const md = buildReportMarkdown(sampleReport(), new Date('2026-09-17T12:00:00Z'))
+        expect(md).toContain('# run #155 评测报告')
+        expect(md).toContain('| Recall@k | 94.9% |')
+        expect(md).toContain('## 生成与判定')
+        expect(md).toContain('| 幻觉率 | 0.0% |')
+        expect(md).toContain('命中但排序靠后: 1')
+        expect(md).toContain('2026-09-17T12:00:00.000Z')
+    })
+
+    it('不铺逐题明细(明细留给 CSV), 但要指向它', () => {
+        const md = buildReportMarkdown(sampleReport())
+        expect(md).not.toContain('zjc-027')
+        expect(md).toContain('逐题明细')
+    })
+
+    it('只跑检索的 run 不出"生成与判定"段(没有判定就别装作有)', () => {
+        const report = sampleReport()
+        report.metrics = { recall_at_k: 0.94 } as RunMetrics
+        const md = buildReportMarkdown(report)
+        expect(md).not.toContain('## 生成与判定')
+        expect(md).toContain('| Recall@k | 94.0% |')
+    })
+})
+
+describe('reportExportFilename', () => {
+    it('文件名带 run 与日期, 与 A/B 导出同一套习惯', () => {
+        expect(reportExportFilename(155, 'csv', new Date('2026-09-17T12:00:00Z')))
+            .toBe('run-155-report-20260917.csv')
     })
 })

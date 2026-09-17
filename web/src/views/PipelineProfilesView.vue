@@ -35,6 +35,7 @@ import {
 import type { PipelinePreview, PipelineProfile } from '../api/types'
 import { currentProjectId, useProject } from '../composables/useProject'
 import { formatDateTime, shortHash } from '../utils/format'
+import { usePermission } from '../composables/usePermission'
 import {
   configToForm,
   emptyProfileForm,
@@ -60,6 +61,8 @@ const preview = ref<PipelinePreview | null>(null)
 const previewing = ref(false)
 
 const { hasProjects, emptyHint } = useProject()
+// M7-3: 模板的增删改都是写操作
+const { canWrite, canDelete } = usePermission()
 
 async function load() {
   const projectId = currentProjectId.value
@@ -247,11 +250,16 @@ const columns: DataTableColumns<PipelineProfile> = [
     render: (row) =>
         h(NSpace, { size: 4 }, {
           default: () => [
-            h(NButton, { size: 'small', quaternary: true, onClick: () => openEdit(row) }, { default: () => '编辑' }),
+            h(NButton, {
+              size: 'small', quaternary: true, disabled: !canWrite.value,
+              onClick: () => openEdit(row),
+            }, { default: () => '编辑' }),
             h(NButton, {
               size: 'small',
               quaternary: true,
               type: 'error',
+              // 删配置模板是不可逆动作: 只给管理员(M7-1 的权限矩阵在服务端也会拦)
+              disabled: !canDelete.value,
               onClick: () => onDelete(row),
             }, { default: () => '删除' }),
           ],
@@ -269,7 +277,7 @@ const columns: DataTableColumns<PipelineProfile> = [
       <template #header-extra>
         <NSpace>
           <NButton size="small" :loading="loading" @click="load">刷新</NButton>
-          <NButton size="small" type="primary" @click="openCreate">新建模板</NButton>
+          <NButton size="small" type="primary" :disabled="!canWrite" @click="openCreate">新建模板</NButton>
         </NSpace>
       </template>
 
@@ -300,7 +308,7 @@ const columns: DataTableColumns<PipelineProfile> = [
         <NButton size="small" :disabled="!canPreview" :loading="previewing" @click="runPreview">
           用表单里的配置预览
         </NButton>
-        <NButton size="small" quaternary @click="openCreate()">用新配置试算</NButton>
+        <NButton size="small" quaternary :disabled="!canWrite" @click="openCreate()">用新配置试算</NButton>
       </NSpace>
 
       <NDescriptions v-if="preview" :column="1" label-placement="left" bordered size="small" style="margin-top: 12px">
@@ -412,7 +420,7 @@ const columns: DataTableColumns<PipelineProfile> = [
       <NAlert v-if="formError" type="error" :show-icon="false" style="margin-bottom: 12px">{{ formError }}</NAlert>
       <NSpace justify="end">
         <NButton @click="showModal = false">取消</NButton>
-        <NButton :loading="saving" @click="submit">保存</NButton>
+        <NButton :loading="saving" :disabled="!canWrite" @click="submit">保存</NButton>
       </NSpace>
     </NModal>
   </div>

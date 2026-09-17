@@ -25,6 +25,7 @@ import { listHumanGold, updateHumanGold, upsertHumanGold } from '../api/humanGol
 import type { CaseContextResponse, HumanGoldScore, Run, RunCaseResult } from '../api/types'
 import { formatPercent, shortHash } from '../utils/format'
 import { flagLabel, primaryFlag, claimLabel, claimTagType } from '../utils/report'
+import { usePermission } from '../composables/usePermission'
 import {
   GOLD_SHORTCUT_HELP,
   GOLD_VERDICTS,
@@ -39,6 +40,8 @@ import {
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+// M7-3: 打分是写操作 —— 只读账号看得到金标, 但不该能改
+const { canWrite } = usePermission()
 
 const runs = ref<Run[]>([])
 const runId = ref<number | null>(route.query.run ? Number(route.query.run) : null)
@@ -453,6 +456,7 @@ function onRowProps(row: GoldRow) {
                   size="small"
                   :type="selected.gold?.verdict === verdict ? 'primary' : 'default'"
                   :loading="saving"
+                  :disabled="!canWrite"
                   @click="markVerdict(verdict)"
               >
                 {{ index + 1 }} {{ goldVerdictLabel(verdict) }}
@@ -467,6 +471,7 @@ function onRowProps(row: GoldRow) {
                 :count="5"
                 size="small"
                 style="margin-bottom: 10px"
+                :readonly="!canWrite"
                 @update:value="(value: number) => save({ helpfulness: value })"
             />
 
@@ -478,6 +483,7 @@ function onRowProps(row: GoldRow) {
                 :count="5"
                 size="small"
                 style="margin-bottom: 10px"
+                :readonly="!canWrite"
                 @update:value="(value: number) => save({ relevance: value })"
             />
 
@@ -491,7 +497,7 @@ function onRowProps(row: GoldRow) {
               <NText depth="3" style="font-size: 12px">复核（换个人看过并确认）</NText>
               <NSwitch
                   :value="selected.gold?.reviewed ?? false"
-                  :disabled="!selected.gold"
+                  :disabled="!selected.gold || !canWrite"
                   size="small"
                   @update:value="toggleReviewed"
               />
@@ -509,7 +515,9 @@ function onRowProps(row: GoldRow) {
                 style="margin-bottom: 8px"
             />
             <NSpace justify="end">
-              <NButton size="small" :loading="saving" @click="save({ note: noteDraft })">保存备注</NButton>
+              <NButton size="small" :loading="saving" :disabled="!canWrite" @click="save({ note: noteDraft })">
+                保存备注
+              </NButton>
               <NButton size="small" quaternary @click="step(-1)">上一题 (b)</NButton>
               <NButton size="small" type="primary" quaternary @click="next">下一题 (n)</NButton>
             </NSpace>
