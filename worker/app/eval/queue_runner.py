@@ -751,15 +751,26 @@ class QueueRunner:
         result = aggregate(evaluated, top_k, skipped=skipped)
         # 生成侧用量(D8 成本)
         result.update(get_generation_usage(self.dsn, run_id))
-        # judge 侧结果与用量(M4-2): 三个率的分母都是 claims_total, 三率之和 = 1
+        # judge 侧结果与用量(M4-2): 三个率的分母都是 claims_total, 三率之和 = 1。
+        #
+        # **没有判定的 run 不写这些键**(实测踩过): 以前无论有没有判定都写
+        # `hallucination_rate: 0.0`, 于是一个纯检索的 run 在库里长得像"零幻觉" ——
+        # 直接查库或看 JSON 的人会被这个 0 骗到(报告页有 hasLlmMetrics 兜着, 但数据本身不该说谎)。
+        # 口径与 M4-2 一致: **「没有判定」不等于「零幻觉」**。
         usage = get_judge_usage(self.dsn, run_id)
         total = float(usage.get("claims_total") or 0)
         judged_cases = float(usage.get("cases_judged") or 0)
-        result.update(usage)
-        result["claim_support_rate"] = round(float(usage.get("claims_supported") or 0) / total, 6) if total else 0.0
-        result["hallucination_rate"] = round(float(usage.get("claims_unsupported") or 0) / total, 6) if total else 0.0
-        result["irrelevant_rate"] = round(float(usage.get("claims_irrelevant") or 0) / total, 6) if total else 0.0
-        result["avg_claims_per_answer"] = round(total / judged_cases, 4) if judged_cases else 0.0
+        judge_calls = float(usage.get("judge_claims_calls") or 0)
+        # "这次判过没有"的判据是"有没有调用过判定"(判过但答案没有可核查断言时
+        # cases_judged 会是 0, 那时候"判过"这件事仍然要看得出来, 否则与"根本没跑判定"混淆)。
+        if judged_cases > 0 or judge_calls > 0:
+            result.update(usage)
+            if total > 0:
+                result["claim_support_rate"] = round(float(usage.get("claims_supported") or 0) / total, 6)
+                result["hallucination_rate"] = round(float(usage.get("claims_unsupported") or 0) / total, 6)
+                result["irrelevant_rate"] = round(float(usage.get("claims_irrelevant") or 0) / total, 6)
+                result["avg_claims_per_answer"] = round(total / judged_cases, 4)
+            # total == 0: 分母为 0, 三个率与均值都不写 —— 它们在这里没有意义
         # 归因元信息(D15): 规则版本 + 覆盖范围 + 全部阈值。
         # 放进 metrics 而不是快照: 快照参与 config_hash, 加段会让历史 run 的指纹全部失配,
         # 而 metrics 本来就是"这次 run 实际发生了什么"(已有 k / token 用量)。

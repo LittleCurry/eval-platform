@@ -768,16 +768,46 @@ def test_judge_metrics_rates_are_aggregated(patched, monkeypatch: pytest.MonkeyP
     assert metrics["recall_at_k"] == 0.5, "judge 不影响检索侧指标"
 
 
-def test_judge_rates_are_zero_when_no_claims(patched):
-    """没有任何 claim 时三率都为 0, 不能出现除零或 NaN。"""
-    fake_queue, retriever = patched(items=make_items(1), hits=["p1"], gold_ids={"p1"})
+def test_no_claims_omits_rate_metrics(patched, monkeypatch: pytest.MonkeyPatch):
+    """判过但答案里没有可核查断言时: **不写三率**(分母为 0 的率值没有意义)。
 
-    run_job(make_judging_runner(retriever, FakeLLM()))
+    以前这里写 0.0 —— 那会让"分母是 0"与"真的一条幻觉都没有"在库里长得一样。
+    但"判过"这件事仍要看得出来(否则与"根本没跑判定"混淆), 所以用量键照写。
+    """
+    fake_queue, retriever = patched(items=make_items(1), hits=["p1"], gold_ids={"p1"},
+                                   generation=GENERATION_SECTION, judge=JUDGE_SECTION)
+    monkeypatch.setattr(qr, "get_judge_usage", lambda dsn, run_id: {
+        **JUDGE_USAGE_ZERO, "judge_claims_calls": 1, "judge_rubric_calls": 1,
+    })
+
+    run_job(make_judging_runner(retriever, FakeLLM(), QueuedLLM(EMPTY_CLAIMS, OK_RUBRIC)))
 
     metrics = fake_queue.metrics_updates[0]
-    assert metrics["claim_support_rate"] == 0.0
-    assert metrics["hallucination_rate"] == 0.0
-    assert metrics["avg_claims_per_answer"] == 0.0
+    for key in ("claim_support_rate", "hallucination_rate", "irrelevant_rate", "avg_claims_per_answer"):
+        assert key not in metrics, f"没有可核查断言时不该写 {key}"
+    assert metrics["cases_judged"] == 0
+    assert metrics["judge_claims_calls"] == 1, "判过这件事要看得出来(否则与没跑判定混淆)"
+    assert metrics["recall_at_k"] == 0.5, "检索侧指标照常"
+
+
+def test_retrieval_only_run_has_no_llm_metrics(patched):
+    """**纯检索的 run 不该出现任何 LLM 侧键**(实测踩过).
+
+    真机上遇过: 一个只跑检索的 run 在 runs.metrics 里带着 hallucination_rate=0.0 ——
+    报告页有 hasLlmMetrics 兜着不会误显示, 但直接查库的人会读成"这次零幻觉"。
+    数据本身不该说谎。
+    """
+    fake_queue, retriever = patched(items=make_items(1), hits=["p1"], gold_ids={"p1"})
+
+    # 纯检索: 用 make_runner(不带生成/judge 客户端与 prompt), 快照里也没有那两段
+    run_job(make_runner(retriever))
+
+    metrics = fake_queue.metrics_updates[0]
+    for key in ("cases_judged", "claims_total", "hallucination_rate", "claim_support_rate",
+                "irrelevant_rate", "avg_claims_per_answer", "rubric_cases"):
+        assert key not in metrics, f"纯检索的 run 不该有 {key}"
+    assert metrics["recall_at_k"] == 0.5
+    assert metrics["attribution"]["scope"] == "retrieval"
 
 
 def test_judge_cache_is_reused_across_runs(patched):
