@@ -20,6 +20,7 @@ import type { Role, UserAccount } from '../api/types'
 import { formatDateTime } from '../utils/format'
 import { roleLabel, roleTagType } from '../utils/session'
 import { useSession } from '../composables/useSession'
+import AsyncState from '../components/AsyncState.vue'
 
 const message = useMessage()
 const session = useSession()
@@ -201,7 +202,7 @@ const columns: DataTableColumns<UserAccount> = [
         </NSpace>
       </template>
 
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">
+      <NAlert v-if="errorText && users.length > 0" type="error" :show-icon="false" style="margin-bottom: 12px">
         {{ errorText }}
       </NAlert>
 
@@ -210,14 +211,22 @@ const columns: DataTableColumns<UserAccount> = [
         管理员 = 还能删数据、管账号。改角色后对方**下一次刷新**即生效（停用是立刻生效）。
       </NText>
 
-      <NDataTable
-          :columns="columns"
-          :data="users"
-          :loading="loading"
-          :row-key="(row: UserAccount) => String(row.id)"
-          :scroll-x="1100"
-          size="small"
-      />
+      <AsyncState
+          :loading="loading && users.length === 0"
+          :error="users.length === 0 ? errorText : ''"
+          :empty="!loading && users.length === 0 && !errorText"
+          empty-text="还没有任何账号：点右上角「添加账号」创建（默认给「只读」角色）"
+          @retry="load"
+      >
+        <NDataTable
+            :columns="columns"
+            :data="users"
+            :loading="loading"
+            :row-key="(row: UserAccount) => String(row.id)"
+            :scroll-x="1100"
+            size="small"
+        />
+      </AsyncState>
     </NCard>
 
     <NModal

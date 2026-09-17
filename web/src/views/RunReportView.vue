@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import type { DataTableColumns } from 'naive-ui'
 import {
   NAlert,
   NButton,
@@ -39,13 +38,11 @@ import {
   statusTagType,
 } from '../utils/format'
 import {
-  answerSnippet,
   buildReportCsv,
   buildReportMarkdown,
   reportExportFilename,
   attributionText,
   claimLabel,
-  claimCounter,
   claimSummary,
   claimTagType,
   contextNotice,
@@ -57,8 +54,14 @@ import {
   missingCaseNotice,
   primaryFlag,
   ratesConsistent,
-  rubricSummary,
 } from '../utils/report'
+import {
+  CASE_TABLE_SCROLL_X,
+  WORST_TABLE_SCROLL_X,
+  caseTableColumns,
+  worstTableColumns,
+} from '../utils/reportTable'
+import AsyncState from '../components/AsyncState.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -349,113 +352,13 @@ const progressLabel = computed(() => {
 
 // ---- 表格列 ----
 
-/** 主因标签(flags[0]): 报告的第一眼应该是"这题的锅在谁头上"。 */
-function primaryFlagCell(row: RunCaseResult) {
-  const flag = primaryFlag(row.flags)
-  if (!flag) return h(NText, { depth: 3 }, { default: () => '—' })
-  return h('span', { title: (row.flags ?? []).join(' → ') },
-      [h(NTag, { size: 'small', type: flagTagType(flag) }, { default: () => flagLabel(flag) })])
-}
-
-function rubricCell(row: RunCaseResult) {
-  const summary = rubricSummary(row.judge)
-  if (summary === null) return h(NText, { depth: 3 }, { default: () => '—' })
-  const reason = row.judge?.rubric?.reason ?? ''
-  return h('span', { title: reason }, [summary])
-}
-
 /**
- * 断言列用紧凑计数 "支持/无据/无关"(列宽只有 96px, 长文案会被裁)。
- * 出现"无据/无关"时标红 —— 一行坏答案在表里第一眼就该被看见。
+ * 列宽、对齐、表头口径提示与单元格渲染都收在 utils/reportTable.ts
+ * (那里有单测钉住"加列要同步 scroll-x"与"数字列右对齐"), 这里只接上"点详情"这个动作。
  */
-function claimsCell(row: RunCaseResult) {
-  const counts = claimCounter(row.judge)
-  if (counts === null) return h(NText, { depth: 3 }, { default: () => '—' })
-  const title = `${counts.supported} 有据 / ${counts.unsupported} 无据 / ${counts.irrelevant} 无关`
-  const text = `${counts.supported}/${counts.unsupported}/${counts.irrelevant}`
-  if (counts.unsupported > 0 || counts.irrelevant > 0) {
-    return h('span', { title, style: 'color: #d03050; font-weight: 600' }, [text])
-  }
-  return h('span', { title, style: 'color: rgba(127, 127, 127, 0.9)' }, [text])
-}
+const worstColumns = worstTableColumns({ openDetail })
+const caseColumns = caseTableColumns({ openDetail })
 
-function answerCell(row: RunCaseResult) {
-  // 不截断(交给列宽省略 + 悬浮 tooltip), 只做单行化, 免得 tooltip 也只剩半句
-  return answerSnippet(row.answer, 0) ?? h(NText, { depth: 3 }, { default: () => '—' })
-}
-
-// 列宽合计 = 固定列 + 问题列(自适应)。容器可用宽度约 1110px(1200 上限 - 两侧留白),
-// 所以刻意把固定列压在 ~890px, 留 200px 以上给"问题"; 同时给表格设 scroll-x,
-// 窗口更窄时改为横向滚动, 而不是把右边的列裁掉。
-const CASE_TABLE_SCROLL_X = 1086
-const WORST_TABLE_SCROLL_X = 776
-
-const qidColumn: DataTableColumns<RunCaseResult>[number] = {
-  // 固定在左侧: 横向滚动时也知道自己在看哪一题
-  title: 'qid',
-  key: 'qid',
-  width: 96,
-  fixed: 'left',
-}
-
-const difficultyColumn: DataTableColumns<RunCaseResult>[number] = {
-  title: '难度',
-  key: 'difficulty',
-  width: 64,
-  render: (row) =>
-      row.difficulty
-          ? h(NTag, { size: 'small', type: difficultyTagType(row.difficulty) }, { default: () => row.difficulty })
-          : null,
-}
-
-const actionColumn: DataTableColumns<RunCaseResult>[number] = {
-  title: '操作',
-  key: 'actions',
-  width: 92,
-  fixed: 'right',
-  render: (row) =>
-      h(NButton, { size: 'small', quaternary: true, onClick: () => openDetail(row) }, { default: () => '详情' }),
-}
-
-const worstColumns: DataTableColumns<RunCaseResult> = [
-  qidColumn,
-  { title: '问题', key: 'question', ellipsis: { tooltip: true } },
-  difficultyColumn,
-  { title: 'Recall', key: 'recall', width: 82, render: (row) => formatPercent(row.metrics?.recall) },
-  {
-    title: '首个命中',
-    key: 'first_hit_rank',
-    width: 110,
-    render: (row) => (row.metrics?.first_hit_rank ? `第 ${row.metrics.first_hit_rank} 位` : '未命中'),
-  },
-  { title: '主因', key: 'primary_flag', width: 132, render: (row) => primaryFlagCell(row) },
-  actionColumn,
-]
-
-const caseColumns: DataTableColumns<RunCaseResult> = [
-  qidColumn,
-  { title: '问题', key: 'question', ellipsis: { tooltip: true } },
-  difficultyColumn,
-  { title: 'Recall', key: 'recall', width: 82, render: (row) => formatPercent(row.metrics?.recall) },
-  {
-    title: 'MRR',
-    key: 'rr',
-    width: 72,
-    render: (row) => formatScore(row.metrics?.reciprocal_rank),
-  },
-  { title: '主因', key: 'primary_flag', width: 132, render: (row) => primaryFlagCell(row) },
-  { title: '断言', key: 'claims', width: 96, render: (row) => claimsCell(row) },
-  { title: 'rubric', key: 'rubric', width: 72, render: (row) => rubricCell(row) },
-  {
-    title: '答案',
-    key: 'answer',
-    width: 180,
-    // 交给表格做省略 + 悬浮显示全文: 单元格里再截断一次会让 tooltip 也只剩半句
-    ellipsis: { tooltip: true },
-    render: (row) => answerCell(row),
-  },
-  actionColumn,
-]
 </script>
 
 <template>
@@ -493,6 +396,15 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
       </NAlert>
     </NCard>
 
+    <!-- 首屏失败时不要让整页变成一张空白: 统一三态(骨架屏 / 错误+重试 / 空态) -->
+    <AsyncState
+        :loading="loading && !report"
+        :error="report ? '' : errorText"
+        :empty="!loading && !report && !errorText"
+        empty-text="这次 run 还没有报告：等任务跑完，或去「评测运行」页确认它的状态"
+        :skeleton-rows="6"
+        @retry="loadAll"
+    >
     <NCard :title="report ? `运行报告 · run #${report.run.id}` : '运行报告'" style="margin-bottom: 16px">
       <template #header-extra>
         <NSpace align="center" :size="8">
@@ -540,7 +452,7 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
         </NSpace>
       </template>
 
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">
+      <NAlert v-if="errorText && report" type="error" :show-icon="false" style="margin-bottom: 12px">
         {{ errorText }}
       </NAlert>
 
@@ -648,6 +560,7 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
           size="small"
       />
     </NCard>
+    </AsyncState>
 
     <NDrawer v-model:show="showDetail" :width="620">
       <NDrawerContent :title="detail ? `case 详情 · ${detail.qid}` : 'case 详情'">
@@ -774,7 +687,8 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
   line-height: 1.6;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(127, 127, 127, 0.08);
+  /* 色值统一走语义色板(utils/palette.ts), 由 main.ts 挂到 <html> 上 */
+  background: var(--ev-neutral-soft);
 }
 
 .claim-row {
@@ -784,18 +698,18 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
 }
 
 .claim-supported {
-  border-left-color: #18a058;
-  background: rgba(24, 160, 88, 0.08);
+  border-left-color: var(--ev-success);
+  background: var(--ev-success-soft);
 }
 
 .claim-unsupported {
-  border-left-color: #d03050;
-  background: rgba(208, 48, 80, 0.1);
+  border-left-color: var(--ev-error);
+  background: var(--ev-error-soft);
 }
 
 .claim-irrelevant {
-  border-left-color: #f0a020;
-  background: rgba(240, 160, 32, 0.1);
+  border-left-color: var(--ev-warning);
+  background: var(--ev-warning-soft);
 }
 
 /* M4-4.1: 上下文正文块。限高 + 内部滚动 —— 抽屉本身不该被一整篇 chunk 撑爆。 */
@@ -817,6 +731,6 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
   margin-top: 4px;
   padding: 6px 8px;
   border-radius: 6px;
-  background: rgba(127, 127, 127, 0.08);
+  background: var(--ev-neutral-soft);
 }
 </style>

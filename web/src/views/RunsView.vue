@@ -28,6 +28,7 @@ import {
   statusLabel,
   statusTagType,
 } from '../utils/format'
+import AsyncState from '../components/AsyncState.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -206,7 +207,7 @@ const columns: DataTableColumns<Run> = [
       </NSpace>
     </template>
 
-    <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">
+    <NAlert v-if="errorText && runs.length > 0" type="error" :show-icon="false" style="margin-bottom: 12px">
       {{ errorText }}
     </NAlert>
 
@@ -214,12 +215,20 @@ const columns: DataTableColumns<Run> = [
       每次评测都会留下一条 run：包含全量配置快照、配置指纹与代码版本；有任务在跑时进度条会自动刷新。
     </NText>
 
-    <NDataTable
-        :columns="columns"
-        :data="runs"
-        :loading="loading"
-        :row-key="(row: Run) => row.id"
-        size="small"
-    />
+    <AsyncState
+        :loading="loading && runs.length === 0"
+        :error="runs.length === 0 ? errorText : ''"
+        :empty="!loading && runs.length === 0 && !errorText && hasProjects"
+        empty-text="还没有评测运行：在数据集详情页点「提交评测」，跑完这里会留下一条 run（含指标与配置指纹）"
+        @retry="load"
+    >
+      <NDataTable
+          :columns="columns"
+          :data="runs"
+          :loading="loading"
+          :row-key="(row: Run) => row.id"
+          size="small"
+      />
+    </AsyncState>
   </NCard>
 </template>

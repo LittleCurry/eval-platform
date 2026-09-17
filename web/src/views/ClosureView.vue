@@ -34,6 +34,7 @@ import { statusLabel, statusTagType } from '../utils/annotation'
 import { flagsText, evidenceText, evidenceHighlights, closureActionText, closureCards,
   closureGuard, closureSummaryLine, closureVerdictLabel, closureVerdictType, verifyHint,
   candidateRunOptions } from '../utils/closure'
+import AsyncState from '../components/AsyncState.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -159,6 +160,12 @@ async function markVerified(record: ClosureRecord) {
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err))
   }
+}
+
+/** AsyncState 的重试: run 列表与闭环报告都可能刚失败过, 两个一起重来才算真的重试。 */
+async function reload() {
+  await loadRuns()
+  await loadClosure()
 }
 
 onMounted(async () => {
@@ -350,38 +357,47 @@ const columns: DataTableColumns<ClosureRecord> = [
         反了会把修好的题读成弄坏的题。
       </NText>
 
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
+      <NAlert v-if="errorText && report !== null" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
       <NAlert v-if="guard" :type="guard.type" :show-icon="false" style="margin-bottom: 12px">
         <NText style="font-size: 13px">{{ guard.text }}</NText>
       </NAlert>
 
-      <NGrid v-if="report" :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-        <NGi v-for="card in cards" :key="card.label" span="4 s:2 m:1">
-          <NStatistic :label="card.label" :value="String(card.value)" />
-          <NText depth="3" style="font-size: 12px">{{ card.hint }}</NText>
-        </NGi>
-      </NGrid>
+      <!-- 主数据是一个对象(report): 三态判断用 report === null(闭环报告没拿到), 而不是某个数组长度 -->
+      <AsyncState
+          :loading="loading && report === null"
+          :error="report === null ? errorText : ''"
+          :empty="!loading && report === null && !errorText"
+          empty-text="先在上方选基线 run 与对照 run，才能核对这次改动到底修好了没有"
+          @retry="reload"
+      >
+        <NGrid v-if="report" :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+          <NGi v-for="card in cards" :key="card.label" span="4 s:2 m:1">
+            <NStatistic :label="card.label" :value="String(card.value)" />
+            <NText depth="3" style="font-size: 12px">{{ card.hint }}</NText>
+          </NGi>
+        </NGrid>
 
-      <NSpace align="center" justify="space-between" style="margin-top: 14px">
-        <NText style="font-size: 13px">{{ summaryLine }}</NText>
-        <NSpace align="center">
-          <NButton size="small" :disabled="!canSubmit" @click="openRerun">改配置重跑</NButton>
-          <NButton
-              v-if="eligibleCount > 0"
-              size="small"
-              type="primary"
-              :loading="verifying"
-              :disabled="!canWrite"
-              @click="verifyAll"
-          >
-            一键验证这 {{ eligibleCount }} 题
-          </NButton>
-          <NTag v-if="report" size="small">
-            {{ shortHash(report.baseline_hash) }} → {{ shortHash(report.candidate_hash) }}
-          </NTag>
+        <NSpace align="center" justify="space-between" style="margin-top: 14px">
+          <NText style="font-size: 13px">{{ summaryLine }}</NText>
+          <NSpace align="center">
+            <NButton size="small" :disabled="!canSubmit" @click="openRerun">改配置重跑</NButton>
+            <NButton
+                v-if="eligibleCount > 0"
+                size="small"
+                type="primary"
+                :loading="verifying"
+                :disabled="!canWrite"
+                @click="verifyAll"
+            >
+              一键验证这 {{ eligibleCount }} 题
+            </NButton>
+            <NTag v-if="report" size="small">
+              {{ shortHash(report.baseline_hash) }} → {{ shortHash(report.candidate_hash) }}
+            </NTag>
+          </NSpace>
         </NSpace>
-      </NSpace>
-      <NText depth="3" style="display: block; margin-top: 8px; font-size: 12px">{{ actionText }}</NText>
+        <NText depth="3" style="display: block; margin-top: 8px; font-size: 12px">{{ actionText }}</NText>
+      </AsyncState>
     </NCard>
 
     <NCard title="逐题核对" style="margin-bottom: 16px">

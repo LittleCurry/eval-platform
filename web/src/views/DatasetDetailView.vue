@@ -17,6 +17,7 @@ import {
 } from 'naive-ui'
 import { deleteCase, getDataset, importCases, listCases } from '../api/datasets'
 import type { CaseItem, Dataset, ImportReport } from '../api/types'
+import AsyncState from '../components/AsyncState.vue'
 
 const route = useRoute()
 const message = useMessage()
@@ -27,6 +28,9 @@ const cases = ref<CaseItem[]>([])
 const loading = ref(false)
 const errorText = ref('')
 
+// 详情页的主数据是"用例列表" cases(表格), 详情本身是单个对象 dataset ——
+// 所以 empty 的语义按等价处理: "加载完成 && 没有错误 && 详情确实存在 && 用例为空"。
+// dataset 为 null 说明详情就没拿到(这种情况会走 error 分支), 此时不能报"还没有用例", 否则会误导。
 async function loadAll() {
   loading.value = true
   errorText.value = ''
@@ -126,7 +130,7 @@ const columns: DataTableColumns<CaseItem> = [
       <NText depth="3">
         {{ dataset.description || '（无描述）' }} · 用例数 {{ dataset.case_count ?? cases.length }}
       </NText>
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-top: 12px">
+      <NAlert v-if="errorText && cases.length > 0" type="error" :show-icon="false" style="margin-top: 12px">
         {{ errorText }}
       </NAlert>
     </NCard>
@@ -172,13 +176,21 @@ const columns: DataTableColumns<CaseItem> = [
     </NCard>
 
     <NCard title="用例列表">
-      <NDataTable
-          :columns="columns"
-          :data="cases"
-          :loading="loading"
-          :row-key="(row: CaseItem) => row.id"
-          size="small"
-      />
+      <AsyncState
+          :loading="loading && cases.length === 0"
+          :error="cases.length === 0 ? errorText : ''"
+          :empty="!loading && !errorText && dataset !== null && cases.length === 0"
+          empty-text="这个数据集还没有用例：在上面的「导入评测用例（JSONL）」里粘贴内容后点「导入」"
+          @retry="loadAll"
+      >
+        <NDataTable
+            :columns="columns"
+            :data="cases"
+            :loading="loading"
+            :row-key="(row: CaseItem) => row.id"
+            size="small"
+        />
+      </AsyncState>
     </NCard>
   </div>
 </template>

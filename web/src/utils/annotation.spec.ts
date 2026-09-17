@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { Annotation, AnnotationStats, RunCaseResult } from '../api/types'
 import {
+    REASONS,
+    REASON_SHORTCUTS,
+    SHORTCUT_GROUPS,
+    SHORTCUT_HELP,
+    STATUS_SHORTCUTS,
+    keyForReason,
+    keyForStatus,
     joinAnnotations,
     nextStatuses,
     pendingFirst,
@@ -9,6 +16,7 @@ import {
     reasonLine,
     reasonTagType,
     shortcutFor,
+    shortcutHelpLine,
     statsLine,
     statusLabel,
     statusTagType,
@@ -81,10 +89,69 @@ describe('shortcutFor', () => {
         expect(shortcutFor('v')).toEqual({ kind: 'status', value: 'verified' })
     })
 
-    it('n 是下一题, 其它键不拦', () => {
+    it('n 是下一题, p/b 是上一题, 其它键不拦', () => {
         expect(shortcutFor('n')).toEqual({ kind: 'next', value: '' })
+        expect(shortcutFor('p')).toEqual({ kind: 'prev', value: '' })
+        expect(shortcutFor('b')).toEqual({ kind: 'prev', value: '' })
         expect(shortcutFor('x')).toBeNull()
         expect(shortcutFor('Enter')).toBeNull()
+    })
+})
+
+describe('快捷键表(单一出处)', () => {
+    it('每个归因都有唯一的数字键, 且与 REASONS 顺序一致', () => {
+        expect(REASON_SHORTCUTS.map((item) => item.key)).toEqual(['1', '2', '3', '4', '5'])
+        expect(REASON_SHORTCUTS.map((item) => item.value)).toEqual([...REASONS])
+        expect(new Set(REASON_SHORTCUTS.map((item) => item.value)).size).toBe(REASONS.length)
+    })
+
+    it('状态键不重复, 且与状态机里的四个状态一致', () => {
+        expect(STATUS_SHORTCUTS.map((item) => item.value)).toEqual(['open', 'fixed', 'verified', 'wontfix'])
+        const keys = STATUS_SHORTCUTS.map((item) => item.key)
+        expect(new Set(keys).size).toBe(keys.length)
+        // 归因键与状态键不能撞车(否则同一个键两种意思)
+        for (const key of keys) expect(REASON_SHORTCUTS.map((item) => item.key)).not.toContain(key)
+    })
+
+    it('keyForReason / keyForStatus 与 shortcutFor 互为逆运算', () => {
+        for (const item of REASON_SHORTCUTS) {
+            expect(keyForReason(item.value)).toBe(item.key)
+            expect(shortcutFor(keyForReason(item.value))).toEqual({ kind: 'reason', value: item.value })
+        }
+        for (const item of STATUS_SHORTCUTS) {
+            expect(keyForStatus(item.value)).toBe(item.key)
+            expect(shortcutFor(keyForStatus(item.value))).toEqual({ kind: 'status', value: item.value })
+        }
+    })
+
+    it('没有绑定的归因/状态返回空串(按钮上就不显示键)', () => {
+        expect(keyForReason('magic')).toBe('')
+        expect(keyForReason(undefined)).toBe('')
+        expect(keyForStatus('magic')).toBe('')
+        expect(keyForStatus(null)).toBe('')
+    })
+
+    it('帮助清单覆盖全部按键, 且每个键都能被 shortcutFor 认出来', () => {
+        const listed = SHORTCUT_GROUPS.flatMap((group) => group.items.flatMap((item) => item.keys))
+        for (const item of [...REASON_SHORTCUTS, ...STATUS_SHORTCUTS]) {
+            expect(listed).toContain(item.key)
+        }
+        expect(listed).toContain('n')
+        expect(listed).toContain('p')
+        expect(listed).toContain('?')
+        // 除了 Ctrl+Enter(组合键)与 ?(页面自己处理: 开关帮助弹窗), 单键都必须真的生效
+        for (const key of listed.filter((item) => item.length === 1 && item !== '?')) {
+            expect(shortcutFor(key), `${key} 在帮助里列了但没绑定`).not.toBeNull()
+        }
+        expect(shortcutFor('?')).toBeNull() // ? 不走归因/状态/翻题表
+    })
+
+    it('一行提示由分组派生, 不会和帮助清单脱钩', () => {
+        expect(SHORTCUT_HELP).toBe(shortcutHelpLine())
+        for (const group of SHORTCUT_GROUPS) {
+            expect(SHORTCUT_HELP).toContain(group.line)
+        }
+        expect(SHORTCUT_HELP).toContain('?')
     })
 })
 

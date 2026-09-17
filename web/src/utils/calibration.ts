@@ -10,6 +10,7 @@ import type {
     JudgeCalibration,
 } from '../api/types'
 import type { TagType } from './format'
+import { helpLine, type ShortcutGroup } from './shortcuts'
 
 /** 三值判定的中文与配色: "看不清"用灰色, 不给人"选它更省事"的暗示。 */
 export const GOLD_VERDICTS = ['faithful', 'hallucinated', 'unclear'] as const
@@ -46,29 +47,57 @@ export function goldProgressText(total: number, scored: number): string {
  *
  * 为什么分数不给快捷键: 数字键已经被判词占了, 把 4/5/6 映射成星级是"看起来更快、
  * 实际更容易按错"的设计 —— 打错的分要回头找, 反而更慢。星级用鼠标点。
+ *
+ * 表是唯一出处(M7-3): 按钮上的"1 忠实(有据)"、帮助弹窗的清单、真正生效的绑定都从这里派生。
  */
+export const GOLD_VERDICT_SHORTCUTS: { key: string; value: string }[] = [
+    { key: '1', value: 'faithful' },
+    { key: '2', value: 'hallucinated' },
+    { key: '3', value: 'unclear' },
+]
+
+export const GOLD_NAV_SHORTCUTS: { keys: string[]; action: string; kind: 'next' | 'prev' }[] = [
+    { keys: ['n'], action: '下一题', kind: 'next' },
+    { keys: ['b'], action: '上一题', kind: 'prev' },
+]
+
 export function goldShortcut(key: string): { kind: 'verdict' | 'next' | 'prev'; value?: string } | null {
-    switch (key) {
-        case '1':
-            return { kind: 'verdict', value: 'faithful' }
-        case '2':
-            return { kind: 'verdict', value: 'hallucinated' }
-        case '3':
-            return { kind: 'verdict', value: 'unclear' }
-        case 'n':
-        case 'N':
-            return { kind: 'next' }
-        case 'b':
-        case 'B':
-            return { kind: 'prev' }
-        default:
-            return null
-    }
+    const verdict = GOLD_VERDICT_SHORTCUTS.find((item) => item.key === key)
+    if (verdict) return { kind: 'verdict', value: verdict.value }
+    const nav = GOLD_NAV_SHORTCUTS.find((item) => item.keys.includes(key))
+    if (nav) return { kind: nav.kind }
+    return null
+}
+
+/** 判词按钮上显示的键(没有绑定的判词返回空串)。 */
+export function keyForVerdict(verdict?: string | null): string {
+    return GOLD_VERDICT_SHORTCUTS.find((item) => item.value === verdict)?.key ?? ''
+}
+
+/** 帮助弹窗的分组 —— 与标注工作台共用同一套展示(components/ShortcutHelpModal.vue)。 */
+export const GOLD_SHORTCUT_GROUPS: ShortcutGroup[] = [
+    {
+        title: '判词（数字键）',
+        line: '1–3 打判词',
+        items: GOLD_VERDICT_SHORTCUTS.map((item) => ({ keys: [item.key], action: goldVerdictLabel(item.value) })),
+    },
+    { title: '翻题', line: 'n/b 翻题', items: GOLD_NAV_SHORTCUTS.map((item) => ({ keys: item.keys, action: item.action })) },
+    {
+        title: '其它',
+        line: '? 看全部',
+        items: [
+            { keys: ['Ctrl', 'Enter'], action: '保存备注（光标在备注框里时）' },
+            { keys: ['?'], action: '打开 / 关闭这份快捷键帮助' },
+        ],
+    },
+]
+
+export function goldShortcutHelpLine(): string {
+    return helpLine(GOLD_SHORTCUT_GROUPS)
 }
 
 export const GOLD_SHORTCUT_HELP =
-    '快捷键：1 忠实(有据) ｜ 2 有幻觉(无据) ｜ 3 看不清 ｜ n 下一题 ｜ b 上一题。' +
-    '判词是必填, 分数(1–5 星)可以后补 —— 先判有没有幻觉, 再回头补分。'
+    `${goldShortcutHelpLine()}。判词是必填, 分数(1–5 星)可以后补 —— 先判有没有幻觉, 再回头补分。`
 
 /**
  * 复核进度: "已复核 3/12"。

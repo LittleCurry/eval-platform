@@ -20,6 +20,7 @@ import { listRuns } from '../api/runs'
 import { getJudgeCalibration } from '../api/humanGold'
 import type { CalibrationDisagreement, GoldScoreCalibration, JudgeCalibration, Run } from '../api/types'
 import { shortHash } from '../utils/format'
+import { softTint } from '../utils/palette'
 import {
   biasText,
   binaryConfusionCells,
@@ -37,6 +38,7 @@ import {
   notesWithSeverity,
   scoreLine,
 } from '../utils/calibration'
+import AsyncState from '../components/AsyncState.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -87,6 +89,12 @@ async function loadReport() {
   } finally {
     loading.value = false
   }
+}
+
+/** AsyncState 的重试: run 列表与报告都可能刚失败过, 两个一起重来才算真的重试。 */
+async function reload() {
+  await loadRuns()
+  await loadReport()
 }
 
 onMounted(async () => {
@@ -199,9 +207,8 @@ const scoreColumns: DataTableColumns<{ human: number; counts: number[] }> = [
           style: {
             padding: '2px 4px',
             borderRadius: '4px',
-            background: intensity > 0
-                ? `rgba(24, 160, 88, ${0.12 + intensity * 0.5})`
-                : 'transparent',
+            // 热力格用语义色板的绿(softTint), 不在这里另抄一个绿
+            background: intensity > 0 ? softTint('success', 0.12 + intensity * 0.5) : 'transparent',
             fontWeight: diagonal && count > 0 ? 700 : 400,
           },
         },
@@ -253,49 +260,58 @@ function scoreRows(score: GoldScoreCalibration): { human: number; counts: number
         </NButton>
       </NSpace>
 
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
+      <NAlert v-if="errorText && report !== null" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
 
       <NAlert v-if="verdict" :type="verdict.type" :show-icon="false" style="margin-bottom: 12px">
         <NText style="font-size: 13px">{{ verdict.text }}</NText>
       </NAlert>
 
-      <NGrid v-if="report" :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-        <NGi span="4 s:2 m:1">
-          <NStatistic
-              label="幻觉判定 κ"
-              :value="report.binary ? report.binary.kappa.toFixed(2) : '—'"
-          />
-          <NText depth="3" style="font-size: 12px">
-            {{ report.binary ? kappaBand(report.binary.kappa).label : '没有可配对的判定' }}
-          </NText>
-        </NGi>
-        <NGi span="4 s:2 m:1">
-          <NStatistic
-              label="一致率"
-              :value="report.binary ? `${(report.binary.agreement * 100).toFixed(1)}%` : '—'"
-          />
-          <NText depth="3" style="font-size: 12px">
-            样本 {{ report.binary?.pairs ?? 0 }} 题（人工"看不清"排除 {{ report.binary?.excluded_unclear ?? 0 }} 题）
-          </NText>
-        </NGi>
-        <NGi span="4 s:2 m:1">
-          <NStatistic label="金标覆盖率" :value="coverageText(report)" />
-          <NText depth="3" style="font-size: 12px">
-            有金标且有判定的 {{ report.gold_judged }} 题, 无判定的 {{ report.gold_unjudged }} 题
-          </NText>
-        </NGi>
-        <NGi span="4 s:2 m:1">
-          <NStatistic label="主标注员" :value="report.primary_annotator || '—'" />
-          <NText depth="3" style="font-size: 12px">
-            {{ report.annotators.length > 1 ? `共 ${report.annotators.length} 人` : '单人标注' }} ｜
-            已复核 {{ report.gold_reviewed }}/{{ report.cases_with_gold }}
-          </NText>
-        </NGi>
-      </NGrid>
+      <!-- 主数据是一个对象(report): 三态判断用 report === null(报告没拿到), 而不是某个数组长度 -->
+      <AsyncState
+          :loading="loading && report === null"
+          :error="report === null ? errorText : ''"
+          :empty="!loading && report === null && !errorText"
+          empty-text="先在上方选一次 run，并在它上面打 30–50 题人工金标，才能算 judge 一致性"
+          @retry="reload"
+      >
+        <NGrid v-if="report" :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+          <NGi span="4 s:2 m:1">
+            <NStatistic
+                label="幻觉判定 κ"
+                :value="report.binary ? report.binary.kappa.toFixed(2) : '—'"
+            />
+            <NText depth="3" style="font-size: 12px">
+              {{ report.binary ? kappaBand(report.binary.kappa).label : '没有可配对的判定' }}
+            </NText>
+          </NGi>
+          <NGi span="4 s:2 m:1">
+            <NStatistic
+                label="一致率"
+                :value="report.binary ? `${(report.binary.agreement * 100).toFixed(1)}%` : '—'"
+            />
+            <NText depth="3" style="font-size: 12px">
+              样本 {{ report.binary?.pairs ?? 0 }} 题（人工"看不清"排除 {{ report.binary?.excluded_unclear ?? 0 }} 题）
+            </NText>
+          </NGi>
+          <NGi span="4 s:2 m:1">
+            <NStatistic label="金标覆盖率" :value="coverageText(report)" />
+            <NText depth="3" style="font-size: 12px">
+              有金标且有判定的 {{ report.gold_judged }} 题, 无判定的 {{ report.gold_unjudged }} 题
+            </NText>
+          </NGi>
+          <NGi span="4 s:2 m:1">
+            <NStatistic label="主标注员" :value="report.primary_annotator || '—'" />
+            <NText depth="3" style="font-size: 12px">
+              {{ report.annotators.length > 1 ? `共 ${report.annotators.length} 人` : '单人标注' }} ｜
+              已复核 {{ report.gold_reviewed }}/{{ report.cases_with_gold }}
+            </NText>
+          </NGi>
+        </NGrid>
 
-      <NText v-if="report && !usable" depth="3" style="display: block; margin-top: 10px; font-size: 12px">
-        结论尚未达标（样本 &lt; 20 题或覆盖率 &lt; 50%）: 上面的数字只能当方向参考, 不要用它给 judge 下判决。
-      </NText>
+        <NText v-if="report && !usable" depth="3" style="display: block; margin-top: 10px; font-size: 12px">
+          结论尚未达标（样本 &lt; 20 题或覆盖率 &lt; 50%）: 上面的数字只能当方向参考, 不要用它给 judge 下判决。
+        </NText>
+      </AsyncState>
     </NCard>
 
     <NCard v-if="report && report.binary" title="幻觉判定：混淆矩阵" style="margin-bottom: 16px">

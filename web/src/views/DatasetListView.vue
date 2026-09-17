@@ -18,6 +18,7 @@ import { createDataset, deleteDataset, listDatasets } from '../api/datasets'
 import type { Dataset } from '../api/types'
 import { currentProjectId, useProject } from '../composables/useProject'
 import { usePermission } from '../composables/usePermission'
+import AsyncState from '../components/AsyncState.vue'
 
 const router = useRouter()
 const message = useMessage()
@@ -130,13 +131,21 @@ const columns: DataTableColumns<Dataset> = [
       {{ errorText }}
     </NAlert>
 
-    <NDataTable
-        :columns="columns"
-        :data="datasets"
-        :loading="loading"
-        :row-key="(row: Dataset) => row.id"
-        size="small"
-    />
+    <AsyncState
+        :loading="loading && datasets.length === 0"
+        :error="datasets.length === 0 ? errorText : ''"
+        :empty="!loading && datasets.length === 0 && !errorText && hasProjects"
+        empty-text="这个项目下还没有数据集：点右上角「新建数据集」，再进详情页导入评测用例"
+        @retry="load"
+    >
+      <NDataTable
+          :columns="columns"
+          :data="datasets"
+          :loading="loading"
+          :row-key="(row: Dataset) => row.id"
+          size="small"
+      />
+    </AsyncState>
 
     <NModal v-model:show="showCreate">
       <NCard style="width: 480px" title="新建数据集" :bordered="false" size="huge" role="dialog">

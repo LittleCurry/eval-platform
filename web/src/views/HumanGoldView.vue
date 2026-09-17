@@ -27,6 +27,7 @@ import { formatPercent, shortHash } from '../utils/format'
 import { flagLabel, primaryFlag, claimLabel, claimTagType } from '../utils/report'
 import { usePermission } from '../composables/usePermission'
 import {
+  GOLD_SHORTCUT_GROUPS,
   GOLD_SHORTCUT_HELP,
   GOLD_VERDICTS,
   goldProgressText,
@@ -34,8 +35,12 @@ import {
   goldShortcut,
   goldVerdictLabel,
   goldVerdictType,
+  keyForVerdict,
   reviewTagType,
 } from '../utils/calibration'
+import { normalizeKey, shouldHandleShortcut } from '../utils/shortcuts'
+import AsyncState from '../components/AsyncState.vue'
+import ShortcutHelpModal from '../components/ShortcutHelpModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -131,6 +136,12 @@ async function loadGold() {
   }
 }
 
+/** AsyncState 的重试: 首屏可能连"run 列表"都没拉到, 两个一起重来才算真的重试。 */
+async function reload() {
+  await loadRuns()
+  await loadGold()
+}
+
 async function selectRow(row: GoldRow | null) {
   selectedCaseId.value = row?.case.case_id ?? null
   noteDraft.value = row?.gold?.note ?? ''
@@ -218,14 +229,32 @@ function next() {
   step(1)
 }
 
+// M7-3: 快捷键帮助弹窗(? 或右下角按钮打开) —— 与标注工作台共用同一个组件
+const showHelp = ref(false)
+// 只读账号按快捷键时提示一次就够, 不要每按一下就弹一条
+let readOnlyWarned = false
+
 function onKeydown(event: KeyboardEvent) {
-  const target = event.target as HTMLElement | null
-  const tag = target?.tagName ?? ''
-  // 在备注框里打字时不抢键(否则备注里的 1/2/3 会变成判词)
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return
-  const hit = goldShortcut(event.key)
+  // 接管判定统一在 utils/shortcuts.ts: 备注框里打字不抢键(否则备注里的 1/2/3 会变成判词),
+  // 带 Ctrl / Cmd / Alt 的组合键也不抢(那是浏览器自己的快捷键)
+  if (!shouldHandleShortcut(event, event.target as HTMLElement | null)) return
+  const key = normalizeKey(event.key)
+  if (key === '?') {
+    event.preventDefault()
+    showHelp.value = !showHelp.value
+    return
+  }
+  const hit = goldShortcut(key)
   if (!hit) return
   event.preventDefault()
+  if (!canWrite.value) {
+    // 只读账号: 按键不该"静默无效", 否则人会以为快捷键坏了
+    if (!readOnlyWarned) {
+      readOnlyWarned = true
+      message.warning('当前角色是只读：能看金标, 但不能改。找管理员把你的角色改成「编辑者」。')
+    }
+    return
+  }
   if (hit.kind === 'next') return next()
   if (hit.kind === 'prev') return step(-1)
   void markVerdict(hit.value as string)
@@ -343,7 +372,7 @@ function onRowProps(row: GoldRow) {
         </NButton>
       </NSpace>
 
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
+      <NAlert v-if="errorText && cases.length > 0" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
 
       <NGrid :cols="3" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
         <NGi span="3 s:1">
@@ -365,16 +394,26 @@ function onRowProps(row: GoldRow) {
     <NGrid :cols="5" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGi span="5 m:3">
         <NCard title="题目列表(按 Recall 升序)" style="margin-bottom: 16px">
-          <NDataTable
-              :columns="columns"
-              :data="rows"
-              :loading="loading"
-              :row-key="(row: GoldRow) => row.case.case_id"
-              :row-props="onRowProps"
-              :scroll-x="760"
-              :row-class-name="(row: GoldRow) => (row.case.case_id === selectedCaseId ? 'row-active' : '')"
-              size="small"
-          />
+          <!-- 三态的判定依据用 cases(这次拉到的用例)而不是 rows: rows 还被"只看未打分"过滤过,
+               过滤出来的空不该说成"这次 run 没有用例" -->
+          <AsyncState
+              :loading="loading && cases.length === 0"
+              :error="cases.length === 0 ? errorText : ''"
+              :empty="!loading && cases.length === 0 && !errorText"
+              empty-text="这次 run 还没有可打分的用例，先在上方选一个跑过生成的 run"
+              @retry="reload"
+          >
+            <NDataTable
+                :columns="columns"
+                :data="rows"
+                :loading="loading"
+                :row-key="(row: GoldRow) => row.case.case_id"
+                :row-props="onRowProps"
+                :scroll-x="760"
+                :row-class-name="(row: GoldRow) => (row.case.case_id === selectedCaseId ? 'row-active' : '')"
+                size="small"
+            />
+          </AsyncState>
         </NCard>
       </NGi>
 
@@ -395,7 +434,7 @@ function onRowProps(row: GoldRow) {
             </NSpace>
 
             <NText depth="3" style="display: block; margin-bottom: 4px; font-size: 12px">模型答案</NText>
-            <NCard size="small" style="margin-bottom: 10px; background: rgba(127,127,127,0.06)">
+            <NCard size="small" class="answer-card">
               <NText style="font-size: 13px; white-space: pre-wrap">
                 {{ selected.case.answer || '(这次 run 没有生成答案)' }}
               </NText>
@@ -447,11 +486,11 @@ function onRowProps(row: GoldRow) {
             </div>
 
             <NText depth="3" style="display: block; margin: 12px 0 6px; font-size: 12px">
-              人工判定（1/2/3）
+              人工判定（按数字键即可）
             </NText>
             <NSpace :size="6" style="margin-bottom: 12px">
               <NButton
-                  v-for="(verdict, index) in GOLD_VERDICTS"
+                  v-for="verdict in GOLD_VERDICTS"
                   :key="verdict"
                   size="small"
                   :type="selected.gold?.verdict === verdict ? 'primary' : 'default'"
@@ -459,7 +498,7 @@ function onRowProps(row: GoldRow) {
                   :disabled="!canWrite"
                   @click="markVerdict(verdict)"
               >
-                {{ index + 1 }} {{ goldVerdictLabel(verdict) }}
+                {{ keyForVerdict(verdict) }} {{ goldVerdictLabel(verdict) }}
               </NButton>
             </NSpace>
 
@@ -513,6 +552,8 @@ function onRowProps(row: GoldRow) {
                 :autosize="{ minRows: 2, maxRows: 4 }"
                 placeholder="备注：这题为什么这么判（校准报告里会带出来看）"
                 style="margin-bottom: 8px"
+                @keydown.ctrl.enter="save({ note: noteDraft })"
+                @keydown.meta.enter="save({ note: noteDraft })"
             />
             <NSpace justify="end">
               <NButton size="small" :loading="saving" :disabled="!canWrite" @click="save({ note: noteDraft })">
@@ -527,13 +568,28 @@ function onRowProps(row: GoldRow) {
     </NGrid>
 
     <NCard size="small">
-      <NText depth="3" style="font-size: 12px">{{ GOLD_SHORTCUT_HELP }}</NText>
+      <NSpace align="center" justify="space-between">
+        <NText depth="3" style="font-size: 12px">{{ GOLD_SHORTCUT_HELP }}</NText>
+        <NButton size="tiny" quaternary @click="showHelp = true">看全部快捷键（?）</NButton>
+      </NSpace>
     </NCard>
+
+    <ShortcutHelpModal
+        v-model:show="showHelp"
+        :groups="GOLD_SHORTCUT_GROUPS"
+        note="分数(1–5 星)没有快捷键：数字键留给判词, 打错的分要回头找, 反而更慢。"
+    />
   </div>
 </template>
 
 <style scoped>
 :deep(.row-active td) {
-  background: rgba(127, 127, 127, 0.12);
+  /* 色值统一走语义色板(utils/palette.ts), 由 main.ts 挂到 <html> 上 */
+  background: var(--ev-neutral-strong);
+}
+
+.answer-card {
+  margin-bottom: 10px;
+  background: var(--ev-neutral-soft);
 }
 </style>

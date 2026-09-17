@@ -45,6 +45,7 @@ import {
   validateProfileForm,
   type ProfileForm,
 } from '../utils/profile'
+import AsyncState from '../components/AsyncState.vue'
 
 const message = useMessage()
 
@@ -281,20 +282,28 @@ const columns: DataTableColumns<PipelineProfile> = [
         </NSpace>
       </template>
 
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
+      <NAlert v-if="errorText && profiles.length > 0" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
       <NText depth="3" style="display: block; margin-bottom: 12px; font-size: 12px">
         模板只固化"提交请求里的旋钮"（切分 / top_k / 是否启用生成与判定），
         语料库与评测集在提交时才选 —— 所以模板到提交请求是一一对应，不会有存了却不生效的字段。
       </NText>
 
-      <NDataTable
-          :columns="columns"
-          :data="profiles"
-          :loading="loading"
-          :row-key="(row: PipelineProfile) => row.id"
-          :scroll-x="1170"
-          size="small"
-      />
+      <AsyncState
+          :loading="loading && profiles.length === 0"
+          :error="profiles.length === 0 ? errorText : ''"
+          :empty="!loading && profiles.length === 0 && !errorText && hasProjects"
+          empty-text="这个项目下还没有配置模板：点右上角「新建模板」定下切分与检索参数，提交评测时直接选它"
+          @retry="load"
+      >
+        <NDataTable
+            :columns="columns"
+            :data="profiles"
+            :loading="loading"
+            :row-key="(row: PipelineProfile) => row.id"
+            :scroll-x="1170"
+            size="small"
+        />
+      </AsyncState>
     </NCard>
 
     <NCard title="提交前看指纹" style="margin-bottom: 16px">

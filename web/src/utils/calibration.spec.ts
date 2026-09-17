@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { GoldBinaryCalibration, JudgeCalibration } from '../api/types'
 import {
+    GOLD_SHORTCUT_GROUPS,
+    GOLD_SHORTCUT_HELP,
+    GOLD_VERDICT_SHORTCUTS,
+    GOLD_VERDICTS,
     biasText,
     disagreementEmptyHint,
     disagreementLabel,
@@ -14,12 +18,14 @@ import {
     coverageText,
     goldProgressText,
     goldShortcut,
+    goldShortcutHelpLine,
     goldVerdictLabel,
     goldVerdictType,
     heatIntensity,
     interAnnotatorText,
     isCalibrationUsable,
     kappaBand,
+    keyForVerdict,
     noteSeverity,
     notesWithSeverity,
     scoreLine,
@@ -95,13 +101,47 @@ describe('goldShortcut', () => {
         expect(goldShortcut('2')).toEqual({ kind: 'verdict', value: 'hallucinated' })
         expect(goldShortcut('3')).toEqual({ kind: 'verdict', value: 'unclear' })
         expect(goldShortcut('n')).toEqual({ kind: 'next' })
-        expect(goldShortcut('B')).toEqual({ kind: 'prev' })
+        expect(goldShortcut('b')).toEqual({ kind: 'prev' })
     })
 
     it('数字 4/5 不给快捷键 —— 星级只走鼠标, 免得按错还要回头找', () => {
         expect(goldShortcut('4')).toBeNull()
         expect(goldShortcut('5')).toBeNull()
         expect(goldShortcut('x')).toBeNull()
+    })
+})
+
+describe('判词快捷键表(单一出处)', () => {
+    it('每个判词都有唯一的数字键, 覆盖 GOLD_VERDICTS', () => {
+        expect(GOLD_VERDICT_SHORTCUTS.map((item) => item.key)).toEqual(['1', '2', '3'])
+        expect(GOLD_VERDICT_SHORTCUTS.map((item) => item.value)).toEqual([...GOLD_VERDICTS])
+    })
+
+    it('keyForVerdict 与 goldShortcut 互为逆运算', () => {
+        for (const item of GOLD_VERDICT_SHORTCUTS) {
+            expect(keyForVerdict(item.value)).toBe(item.key)
+            expect(goldShortcut(keyForVerdict(item.value))).toEqual({ kind: 'verdict', value: item.value })
+        }
+        expect(keyForVerdict('unclear')).toBe('3')
+        expect(keyForVerdict(undefined)).toBe('')
+        expect(keyForVerdict('magic')).toBe('')
+    })
+
+    it('帮助清单覆盖全部按键, 且每个单键都能被 goldShortcut 认出来', () => {
+        const listed = GOLD_SHORTCUT_GROUPS.flatMap((group) => group.items.flatMap((item) => item.keys))
+        for (const item of GOLD_VERDICT_SHORTCUTS) expect(listed).toContain(item.key)
+        expect(listed).toContain('n')
+        expect(listed).toContain('b')
+        expect(listed).toContain('?')
+        for (const key of listed.filter((item) => item.length === 1 && item !== '?')) {
+            expect(goldShortcut(key), `${key} 在帮助里列了但没绑定`).not.toBeNull()
+        }
+    })
+
+    it('一行提示由分组派生, 并保留"分数可后补"的说明', () => {
+        expect(GOLD_SHORTCUT_HELP).toContain(goldShortcutHelpLine())
+        for (const group of GOLD_SHORTCUT_GROUPS) expect(GOLD_SHORTCUT_HELP).toContain(group.line)
+        expect(GOLD_SHORTCUT_HELP).toContain('分数')
     })
 })
 

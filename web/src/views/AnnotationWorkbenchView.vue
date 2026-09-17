@@ -30,10 +30,16 @@ import type { Annotation, AnnotationStats, AnnotationSuggestion, Run, RunCaseRes
 import { flagLabel, primaryFlag } from '../utils/report'
 import { usePermission } from '../composables/usePermission'
 import { formatPercent, shortHash } from '../utils/format'
+import { normalizeKey, shouldHandleShortcut } from '../utils/shortcuts'
+import AsyncState from '../components/AsyncState.vue'
+import ShortcutHelpModal from '../components/ShortcutHelpModal.vue'
 import {
   REASONS,
+  SHORTCUT_GROUPS,
   SHORTCUT_HELP,
   joinAnnotations,
+  keyForReason,
+  keyForStatus,
   nextStatuses,
   pendingFirst,
   progressText,
@@ -161,39 +167,65 @@ async function markReason(reason: string) {
   // 第一次打标自动开单(open), 之后的 reason 修改沿用当前状态
   const current = selected.value?.annotation?.status
   await upsert(current ? { reason } : { status: 'open', reason })
-  next()
+  step(1)
 }
 
 async function markStatus(status: string) {
   if (!canWrite.value) return
   await upsert({ status })
-  if (status === 'verified') next() // 验证完就走, 这是工作台的主循环
+  if (status === 'verified') step(1) // 验证完就走, 这是工作台的主循环
 }
 
 async function saveComment() {
+  if (!canWrite.value) return
   await upsert({ comment: commentDraft.value })
   message.success('评论已保存')
 }
 
-function next() {
+/** 翻题: 工作台的主循环是"看一题 → 打个归因/状态 → 下一题", 所以 n/p 必备。 */
+function step(delta: number) {
   const list = rows.value
   if (list.length === 0) return
   const index = list.findIndex((row) => row.case.case_id === selectedCaseId.value)
-  const target = list[(index + 1) % list.length]
+  const target = list[(index + delta + list.length) % list.length]
   if (target) selectRow(target)
+}
+
+/** 首屏失败时重试: run 列表都没拉到就先重拉 run 列表(否则重试一次还是空)。 */
+function retry() {
+  if (runId.value === null) return loadRuns()
+  return loadWorkbench()
 }
 
 const availableStatuses = computed(() => nextStatuses(selected.value?.annotation?.status))
 
+// M7-3: 快捷键帮助弹窗(`?` 或右下角按钮打开)。
+const showHelp = ref(false)
+// 只读账号按快捷键时提示一次就够, 不要每按一下就弹一条
+let readOnlyWarned = false
+
+function warnReadOnly() {
+  if (readOnlyWarned) return
+  readOnlyWarned = true
+  message.warning('当前角色是只读：能看标注结果，但不能改。找管理员把你的角色改成「编辑者」。')
+}
+
 function onKeydown(event: KeyboardEvent) {
-  const target = event.target as HTMLElement | null
-  const tag = target?.tagName ?? ''
-  // 在输入框里打字时不要抢键(否则评论里的数字会变成"改用检索问题")
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return
-  const hit = shortcutFor(event.key)
+  // 接管判定统一在 utils/shortcuts.ts: 输入框里打字不抢键(否则评论里的数字会变成"改用检索问题"),
+  // 带 Ctrl / Cmd / Alt 的组合键也不抢(那是浏览器自己的快捷键 —— 以前按住 Cmd 按数字会真的改标注)。
+  if (!shouldHandleShortcut(event, event.target as HTMLElement | null)) return
+  const key = normalizeKey(event.key)
+  if (key === '?') {
+    event.preventDefault()
+    showHelp.value = !showHelp.value
+    return
+  }
+  const hit = shortcutFor(key)
   if (!hit) return
   event.preventDefault()
-  if (hit.kind === 'next') return next()
+  if (!canWrite.value) return warnReadOnly()
+  if (hit.kind === 'next') return step(1)
+  if (hit.kind === 'prev') return step(-1)
   if (hit.kind === 'reason') return void markReason(hit.value)
   void markStatus(hit.value)
 }
@@ -271,7 +303,9 @@ function onRowProps(row: AnnotationRow) {
         <NTag v-if="casesWithFlags" size="small" type="warning">有标签的题 {{ casesWithFlags }}</NTag>
       </NSpace>
 
-      <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">{{ errorText }}</NAlert>
+      <NAlert v-if="errorText && rows.length > 0" type="error" :show-icon="false" style="margin-bottom: 12px">
+        {{ errorText }}
+      </NAlert>
 
       <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
         <NGi span="4 s:2 m:1">
@@ -299,18 +333,27 @@ function onRowProps(row: AnnotationRow) {
             <NSpace align="center">
               <NText depth="3" style="font-size: 12px">只看待处理</NText>
               <NSwitch v-model:value="onlyPending" size="small" />
+              <NButton size="tiny" quaternary @click="showHelp = true">快捷键（?）</NButton>
             </NSpace>
           </template>
-          <NDataTable
-              :columns="columns"
-              :data="filteredRows"
-              :loading="loading"
-              :row-key="(row: AnnotationRow) => row.case.case_id"
-              :row-props="onRowProps"
-              :scroll-x="820"
-              :row-class-name="(row: AnnotationRow) => (row.case.case_id === selectedCaseId ? 'row-active' : '')"
-              size="small"
-          />
+          <AsyncState
+              :loading="loading && rows.length === 0"
+              :error="rows.length === 0 ? errorText : ''"
+              :empty="!loading && rows.length === 0 && !errorText"
+              empty-text="这次 run 没有可标注的题：换一个跑过生成/判定的 run，或关掉「只看有标签的」"
+              @retry="retry"
+          >
+            <NDataTable
+                :columns="columns"
+                :data="filteredRows"
+                :loading="loading"
+                :row-key="(row: AnnotationRow) => row.case.case_id"
+                :row-props="onRowProps"
+                :scroll-x="820"
+                :row-class-name="(row: AnnotationRow) => (row.case.case_id === selectedCaseId ? 'row-active' : '')"
+                size="small"
+            />
+          </AsyncState>
         </NCard>
       </NGi>
 
@@ -344,10 +387,12 @@ function onRowProps(row: AnnotationRow) {
               </NButton>
             </NAlert>
 
-            <NText depth="3" style="display: block; margin-bottom: 6px; font-size: 12px">人工归因（1-5）</NText>
+            <NText depth="3" style="display: block; margin-bottom: 6px; font-size: 12px">
+              人工归因（按数字键即可）
+            </NText>
             <NSpace :size="6" style="margin-bottom: 12px">
               <NButton
-                  v-for="(reason, index) in REASONS"
+                  v-for="reason in REASONS"
                   :key="reason"
                   size="small"
                   :type="selected.annotation?.reason === reason ? 'primary' : 'default'"
@@ -355,7 +400,7 @@ function onRowProps(row: AnnotationRow) {
                   :disabled="!canWrite"
                   @click="markReason(reason)"
               >
-                {{ index + 1 }} {{ reasonLabel(reason) }}
+                {{ keyForReason(reason) }} {{ reasonLabel(reason) }}
               </NButton>
             </NSpace>
 
@@ -372,7 +417,7 @@ function onRowProps(row: AnnotationRow) {
                   :disabled="!canWrite"
                   @click="markStatus(status)"
               >
-                {{ statusLabel(status) }}
+                {{ statusLabel(status) }}<template v-if="keyForStatus(status)">（{{ keyForStatus(status) }}）</template>
               </NButton>
             </NSpace>
 
@@ -382,12 +427,15 @@ function onRowProps(row: AnnotationRow) {
                 :autosize="{ minRows: 2, maxRows: 5 }"
                 placeholder="评论（这是要留给人看的话：为什么这么判、下一步怎么改）"
                 style="margin-bottom: 8px"
+                @keydown.ctrl.enter="saveComment"
+                @keydown.meta.enter="saveComment"
             />
             <NSpace justify="end">
               <NButton size="small" :loading="saving" :disabled="!canWrite" @click="saveComment">
                 保存评论
               </NButton>
-              <NButton size="small" type="primary" quaternary @click="next">下一题 (n)</NButton>
+              <NButton size="small" quaternary @click="step(-1)">上一题 (p)</NButton>
+              <NButton size="small" type="primary" quaternary @click="step(1)">下一题 (n)</NButton>
             </NSpace>
           </template>
         </NCard>
@@ -395,13 +443,19 @@ function onRowProps(row: AnnotationRow) {
     </NGrid>
 
     <NCard size="small">
-      <NText depth="3" style="font-size: 12px">{{ SHORTCUT_HELP }}</NText>
+      <NSpace align="center" justify="space-between">
+        <NText depth="3" style="font-size: 12px">{{ SHORTCUT_HELP }}</NText>
+        <NButton size="tiny" quaternary @click="showHelp = true">看全部快捷键（?）</NButton>
+      </NSpace>
     </NCard>
+
+    <ShortcutHelpModal v-model:show="showHelp" :groups="SHORTCUT_GROUPS" />
   </div>
 </template>
 
 <style scoped>
 :deep(.row-active td) {
-  background: rgba(127, 127, 127, 0.12);
+  /* 色值统一走语义色板(utils/palette.ts), 由 main.ts 挂到 <html> 上 */
+  background: var(--ev-neutral-strong);
 }
 </style>
