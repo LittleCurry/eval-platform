@@ -60,23 +60,72 @@ func newLiveRun(t *testing.T, pg *Postgres) (RunJobRef, int64) {
 	return ref, projectID
 }
 
+// requireExclusiveQueue 队列测试的前置条件: **队列里不能有别的任务**。
+//
+// 为什么必须挡: 这组测试操作的是**全局队列**(ClaimJob 取最老的 pending,
+// ReclaimStaleJobs 扫全部 running)。队列里有真实任务时:
+//   - TestQueueClaimWhenEmptyLive 会把它们领走并标成 failed(等于毁掉一次真实评测);
+//   - 并发领取测试会把它们抢成 running 后不再管(页面上永远停在"运行中");
+//   - 断言也会因为别处的任务而失败(看起来像代码坏了)。
+//
+// 所以这里明确跳过并说清怎么跑, 而不是"悄悄少跑一条测试"或"误伤真实任务"。
+func requireExclusiveQueue(t *testing.T, pg *Postgres) {
+	t.Helper()
+	var pending, running int
+	if err := pg.db.QueryRowContext(context.Background(), `
+		SELECT count(*) FILTER (WHERE status = 'pending'),
+		       count(*) FILTER (WHERE status = 'running')
+		FROM jobs`).Scan(&pending, &running); err != nil {
+		t.Fatalf("检查队列状态失败: %v", err)
+	}
+	if pending > 0 || running > 0 {
+		t.Skipf("队列里有 %d 个待领取 / %d 个运行中的任务: 这组测试需要独占队列, "+
+			"先 `make worker` 把它们跑完(或在页面确认没有进行中的评测)再回来跑 live 测试", pending, running)
+	}
+}
+
+// claimOwnJob 领到本次测试创建的那个 job 为止; 中途领到的**别人的**任务原样放回 pending。
+//
+// 为什么需要它: ClaimJob 取的是"最老的 pending", 而队列里随时可能有真实任务
+// (比如你刚从页面上提交了一次评测、worker 又没在跑)。老写法遇到这种情况只能
+// t.Skip —— 那是"悄悄少跑一条测试"; 这里改成"绕过去并把别人的任务放回",
+// 测试既不会误接管真实任务, 也不会把自己跳掉。
+func claimOwnJob(t *testing.T, pg *Postgres, wantJobID int64) *Job {
+	t.Helper()
+	ctx := context.Background()
+	for attempt := 0; attempt < 50; attempt++ {
+		claimed, err := pg.ClaimJob(ctx)
+		if err != nil {
+			t.Fatalf("领取任务失败: %v", err)
+		}
+		if claimed == nil {
+			t.Fatalf("队列里没有可领取的任务(期望 job %d)", wantJobID)
+		}
+		if claimed.ID == wantJobID {
+			return claimed
+		}
+		if _, err := pg.db.ExecContext(ctx, `
+			UPDATE jobs SET status = 'pending', heartbeat_at = NULL, updated_at = now()
+			WHERE id = $1`, claimed.ID); err != nil {
+			t.Fatalf("放回别人的任务失败: %v", err)
+		}
+	}
+	t.Fatalf("队列里有太多待领取任务, 没轮到本次测试创建的 job %d", wantJobID)
+	return nil
+}
+
 func TestQueueCreateAndClaimLive(t *testing.T) {
 	pg := livePostgres(t)
 	ctx := context.Background()
+	requireExclusiveQueue(t, pg)
 
 	ref, _ := newLiveRun(t, pg)
 	if ref.Items != 30 {
 		t.Fatalf("job_items 应为评测集用例数 30, 实际 %d", ref.Items)
 	}
 
-	job, err := pg.ClaimJob(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if job == nil {
-		t.Fatal("应能领到刚创建的任务")
-	}
-	if job.ID != ref.JobID || job.Status != "running" || job.RunID != ref.RunID {
+	job := claimOwnJob(t, pg, ref.JobID)
+	if job.Status != "running" || job.RunID != ref.RunID {
 		t.Fatalf("领取结果不符: %+v (期望 job %d)", job, ref.JobID)
 	}
 	if job.HeartbeatAt == nil {
@@ -91,6 +140,7 @@ func TestQueueCreateAndClaimLive(t *testing.T) {
 func TestQueueConcurrentClaimNoDuplicateLive(t *testing.T) {
 	pg := livePostgres(t)
 	ctx := context.Background()
+	requireExclusiveQueue(t, pg)
 
 	// 造两个待领取任务, 让两个 goroutine 同时领
 	refA, _ := newLiveRun(t, pg)
@@ -127,12 +177,10 @@ func TestQueueConcurrentClaimNoDuplicateLive(t *testing.T) {
 func TestQueueItemsCheckpointAndRetryLive(t *testing.T) {
 	pg := livePostgres(t)
 	ctx := context.Background()
+	requireExclusiveQueue(t, pg)
 
 	ref, _ := newLiveRun(t, pg)
-	job, err := pg.ClaimJob(ctx)
-	if err != nil || job == nil {
-		t.Fatalf("领取任务失败: %v", err)
-	}
+	claimOwnJob(t, pg, ref.JobID)
 
 	first, err := pg.ClaimJobItems(ctx, ref.JobID, 5)
 	if err != nil {
@@ -222,8 +270,10 @@ func TestQueueItemsCheckpointAndRetryLive(t *testing.T) {
 func TestQueueClaimWhenEmptyLive(t *testing.T) {
 	pg := livePostgres(t)
 	ctx := context.Background()
+	requireExclusiveQueue(t, pg)
 
-	// 把现有 pending 任务全部领走(仅本测试创建的 job 会被清理, 这里只是验证"领空返回 nil")
+	// 把队列里剩下的 pending 任务领干净(此时队列里只会有本次测试套件自己造的任务,
+	// 真实任务已被 requireExclusiveQueue 挡在外面), 验证"领空返回 nil"
 	for i := 0; i < 50; i++ {
 		job, err := pg.ClaimJob(ctx)
 		if err != nil {
@@ -244,15 +294,10 @@ func TestQueueClaimWhenEmptyLive(t *testing.T) {
 func TestReclaimStaleJobAndResumeLive(t *testing.T) {
 	pg := livePostgres(t)
 	ctx := context.Background()
+	requireExclusiveQueue(t, pg)
 
 	ref, _ := newLiveRun(t, pg)
-	job, err := pg.ClaimJob(ctx)
-	if err != nil || job == nil {
-		t.Fatalf("领取任务失败: %v", err)
-	}
-	if job.ID != ref.JobID {
-		t.Skip("队列中存在其他 pending 任务, 跳过本条(避免误接管他人任务)")
-	}
+	claimOwnJob(t, pg, ref.JobID)
 
 	items, err := pg.ClaimJobItems(ctx, ref.JobID, 3)
 	if err != nil {
@@ -312,15 +357,10 @@ func TestReclaimStaleJobAndResumeLive(t *testing.T) {
 func TestReclaimLeavesFreshJobAloneLive(t *testing.T) {
 	pg := livePostgres(t)
 	ctx := context.Background()
+	requireExclusiveQueue(t, pg)
 
 	ref, _ := newLiveRun(t, pg)
-	job, err := pg.ClaimJob(ctx)
-	if err != nil || job == nil {
-		t.Fatalf("领取任务失败: %v", err)
-	}
-	if job.ID != ref.JobID {
-		t.Skip("队列中存在其他 pending 任务, 跳过本条")
-	}
+	job := claimOwnJob(t, pg, ref.JobID)
 	if err := pg.HeartbeatJob(ctx, job.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -354,6 +394,7 @@ func TestReclaimLeavesFreshJobAloneLive(t *testing.T) {
 func TestQueueRunningJobIsNeverClaimedTwiceLive(t *testing.T) {
 	pg := livePostgres(t)
 	ctx := context.Background()
+	requireExclusiveQueue(t, pg)
 
 	// ---- 场景 1: 已被持有的 job 不能被二次领取 ----
 	ref, _ := newLiveRun(t, pg)
