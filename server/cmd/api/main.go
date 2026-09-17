@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"eval-platform/server/internal/auth"
 	"eval-platform/server/internal/config"
 	serverhttp "eval-platform/server/internal/http"
 	"eval-platform/server/internal/store"
@@ -26,6 +27,24 @@ func main() {
 
 	qd := store.NewQdrant(cfg.QdrantURL)
 
+	// 认证(M7-1): fail-fast 而不是"退化成一个免登录的 API"。
+	// 忘了配密钥是运维最常见的一类事故, 让它在启动阶段就炸掉, 比跑到线上才发现好。
+	var authService *auth.Service
+	if cfg.AuthDisabled {
+		log.Printf("⚠️  AUTH_DISABLED=1: 鉴权已关闭, /api/v1 全部接口不需登录 —— 仅限本地演示")
+	} else {
+		if cfg.JWTSecret == "" {
+			log.Fatalf("缺少 JWT_SECRET: 生成一个再启动, 例如  openssl rand -base64 48\n" +
+				"(只想本地不登录跑: 设 AUTH_DISABLED=1)")
+		}
+		issuer, err := auth.NewIssuer(cfg.JWTSecret, time.Duration(cfg.TokenTTLHours)*time.Hour)
+		if err != nil {
+			log.Fatalf("JWT_SECRET 不合法: %v", err)
+		}
+		authService = auth.NewService(pg, issuer)
+		log.Printf("鉴权已启用: HS256, token 有效期 %d 小时", cfg.TokenTTLHours)
+	}
+
 	router := serverhttp.NewRouter(serverhttp.Deps{
 		Postgres:  pg,
 		Qdrant:    qd,
@@ -40,6 +59,7 @@ func main() {
 		Profiles:     pg,
 		Annotations:  pg,
 		HumanGold:    pg,
+		Auth:         authService,
 		// 配置模板预览要能算出与提交一致的指纹, 因此与 run 共用同一批默认值(M5-2)
 		EvalEmbedding: eval.EmbeddingConfig{
 			Provider:  cfg.EmbeddingProvider,

@@ -112,7 +112,7 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 
 | 表 | 用途 | 关键字段 |
 |----|------|----------|
-| `users` | 登录、角色 | email/username, password_hash, role(admin/editor/viewer) |
+| `users` | 登录、角色（M7-1 落地） | email(唯一, 强制小写), name, password_hash(bcrypt), role(admin/editor/viewer), disabled, last_login_at |
 | `projects` | 数据隔离命名空间（同事共用） | name, created_by |
 | `corpora` | 语料库 | project_id, name, source_type |
 | `documents` | 语料原文（清洗后） | corpus_id, title, raw_text, meta jsonb |
@@ -362,6 +362,30 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 - **为什么状态机不放 DB 约束**：规则会变（"verified 不能降级"这类业务判断），改规则不该写迁移；而且前端绕不过去——服务端是唯一入口。
 - **为什么要指针语义**：工作台/打分页的交互是"点一下改一个字段"。零值当"没传"会**静默清空**没提交的字段——M6-1 真机踩过一次（只改状态，统计里冒出一批 `unclassified`），`human_gold_scores` 的 upsert 又踩过一次（只改判词，把上次打的分数和备注冲成 NULL/空串，校准样本凭空消失）。两次都是"接口调用方看不出异常"的那种坏。因此 upsert 冲突时按 `COALESCE(EXCLUDED.x, 原值)` **合并**，而不是整行覆盖。
 - **为什么分数要能撤回**：合法分数是 1–5，0 不是分数——正好可以拿 0 当"清空"信号。否则打错一个分只能删整条记录重来，连带把 verdict 一起丢掉。
+
+---
+
+### D22 认证用 bcrypt + 无状态 JWT(HS256)，首用户 bootstrap 成管理员
+
+**决策**：口令 `bcrypt`（`x/crypto`）；token 用 `golang-jwt/jwt/v5` 签 **HS256**，有效期 12 小时；**没有 refresh token、没有会话表、不做服务端撤销**；系统空库时第一个注册者自动成为 admin，之后注册关闭（加人走管理员）。
+
+- **为什么无状态而不是会话表**：单实例内部工具，会话表带来的收益（可撤销、可看在线）远小于它带来的运维面（清理、并发、多实例共享）。代价说清楚：**签出去的 token 到期前撤不回来**，只能换 `JWT_SECRET` 让全部失效。
+- **但"停用账号"必须立即生效**：所以每个请求都回库确认账号仍存在且未停用（`service.Authenticate`）。这是"角色可以等 token 过期、停用不能等"的取舍 —— 同事离职当天必须立刻断掉。
+- **为什么只认 HS256**：`WithValidMethods` 把算法白名单钉死。否则 `alg=none`（无签名）与 `alg=RS256用公钥当HMAC密钥` 这两种经典攻击都能得手，测试里各有一条。
+- **为什么要校验 iss/aud**：只验签名等于"只要是本密钥签的就认"，同一个密钥的另一个服务的 token 就能横向过来。
+- **口令为什么拒绝 >72 字节**：bcrypt 只吃前 72 字节，更长的口令会被**静默截断**（"100 字节口令"等于"它的前 72 字节"）。宁可报错，也不接受一个被剪短的口令。
+- **为什么首用户自动 admin**：否则部署完谁也进不去，只能手动插库。**不做自助注册**：内部工具里"谁能进来"该由管理员决定，而不是"谁先看到地址谁进"。
+- **token 存 localStorage 的代价**：前后端分离 + 无状态 JWT，token 必须由 JS 取出来塞进 `Authorization`。代价是 XSS 能偷 token —— 因此前端不用 `v-html` 渲染用户内容，后端响应里**绝不带** `password_hash`（Go 侧 `json:"-"`，TS 类型里干脆没这个字段）。
+
+### D23 权限 = 5 个动作 × 3 个角色，路由按权限分组
+
+**决策**：动作收敛成 `read / write / submit / delete / admin`，角色是 `viewer / editor / admin`；`server/internal/auth/rbac.go` 是唯一真相源，前端 `utils/session.ts` 照抄同一张表。路由按**权限**分组挂中间件（`read / write / submit / admin / delete` 五个 gin group），不按资源分组。
+
+- **为什么删数据单独一档**：不可逆动作单独给 admin，日常干活的人（editor）不需要它 —— "能改"和"能删"是两种信任级别。
+- **为什么提交实验（`submit`）单独一档**：它会真花钱调 LLM。能看能改的人未必该能随便烧钱。
+- **为什么路由按权限分组**：这样"这个端点谁能用"在路由表上一眼可见，新加端点必须选一个组；漏选不会被静默放过 —— `TestEveryAPIRouteRequiresToken` 会把路由表里每个非公开端点打一遍，要求无 token 时全是 401。
+- **401 与 403 严格分开**：401 = 没登录/失效（前端跳登录页并带回跳地址）；403 = 登录了但没权限（前端**留在原地**说明缺什么权限）。混用会让"权限不足"表现成反复跳登录页，用户永远不知道自己只是没权限。
+- **前端的权限只负责"不让人白点"**：菜单按角色裁剪、路由守卫拦角色不足的页面、禁掉自己改自己的角色选择。真正的边界在服务端 —— 两边各有一份实现且有各自的测试。
 
 ---
 
@@ -640,7 +664,7 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 ### M7 多用户、打磨与部署交付（同事可用）
 
 **任务清单**
-- [ ] 登录/注册 + JWT + RBAC（admin/editor/viewer，权限落到 API 与前端路由）
+- [x] 登录/注册 + JWT + RBAC（admin/editor/viewer，权限落到 API 与前端路由）—— M7-1 完成，见下方小结
 - [ ] project 隔离完善：成员管理、资源归属、跨 project 只读隔离校验
 - [ ] UI 打磨：设计基线统一（空/载/错状态、表格、图表配色）、报告导出按钮、标注页体验
 - [ ] Docker Compose 一键部署（api+worker+web+pg+qdrant+可选 redis），`.env.example` 完整注释
@@ -650,6 +674,33 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 - [ ] 找同事试用一轮，收集 3–5 个真实反馈并修掉高优项
 
 **验收标准**：同事在部署环境注册登录，能独立完成"建项目→导入数据→跑评测→看报告→标 Bad Case"全流程；README 能支撑你面试讲 20 分钟。
+
+**M7-1 完成小结（2026-09-17）：登录 + JWT + RBAC**
+
+**交付物**：迁移 `000009_user_auth`（`users` 补 `disabled`/`last_login_at` + email 小写约束）；`internal/auth`（bcrypt 口令、HS256 JWT 签发/校验、5×3 权限矩阵、gin 中间件）；`/auth/*` 四个端点 + `/users/*` 四个管理端点；路由按权限分成五个组；前端登录页（含"首次创建管理员"）、会话 composable、全局路由守卫、权限不足页、用户管理页、按角色裁剪的菜单与当前账号下拉。
+
+**真机核对（都是跑出来的）**
+- 空库 → `GET /auth/status` 报 `bootstrap_needed=true` → 首次注册直接成为 admin 并拿到 token；再注册返回 409「注册已关闭」。
+- 无 token 访问 `/runs` → 401；伪造/`alg=none` token → 401；带 token → 200。注册响应里**不含**口令哈希。
+- viewer：`GET /runs` 200、`GET /closure` 200；`POST /runs`、`POST /annotations`、`DELETE /datasets/4`、`GET /users` 全部 **403**。
+- 自我保护：管理员改自己的角色 → 409「不能修改自己的角色/停用或删除自己」；删除最后一个可用管理员 → 409。
+- **停用立即生效**：停用 viewer 后，它手里那个还没过期的 token 下一次请求就变 401「账号已停用」。
+- 前端链路：dev server(5173) 代理 `/api` 正常，`/login` 200；把库清回 0 账号后 UI 回到"首次创建管理员"。
+
+**测试**：Go 新增 **30 条**（口令哈希与 72 字节边界/加盐、JWT 篡改·`alg=none`·错密钥·错 iss/aud·过期·缺载荷、权限矩阵逐格、首用户 bootstrap、最后管理员保护、以及 `TestEveryAPIRouteRequiresToken` —— 它把路由表里每个非公开端点打一遍，要求无 token 全是 401，**新端点忘挂权限就直接红**）；web 新增 **21 条**（权限矩阵、守卫三态、会话解析脏数据、菜单裁剪、开放重定向防护）。全量：worker 292 / Go 五包 / web 196。
+
+**踩坑记录**
+- 路由大重排时漏掉了两条已存在的路由（`POST /corpora`、`DELETE /pipeline-profiles/:id`），是**已有测试**抓出来的 —— 这正是"每个端点都要有用例守着"的价值，也促成了上面那条路由表级守卫。
+- `main.go` 对 `JWT_SECRET` 采取 **fail-fast**（缺密钥直接拒绝启动），同时 `Makefile` 的 `api`/`api-restart` 改成先 source `.env`：否则"密钥只在某个终端 export 过"会让本地启动时好时坏。
+
+**未做/转出**
+- **按钮级置灰**：只读账号现在点写操作会收到 403 提示（而不是按钮变灰）—— 归到 M7-3 UI 打磨。
+- refresh token / 服务端撤销 / 登录限流 / OIDC：按 D22 不做；停用账号已覆盖"立刻断开"的主要诉求。
+- project 级成员隔离（谁能看哪个项目）是 **M7-2**，本轮只到"角色级"权限。
+
+> ⚠️ 本地 `.env` 里由本轮写入了一个开发用 `JWT_SECRET`（该文件已被 gitignore）。**部署到别处必须用 `make jwt-secret` 重新生成**；轮换它会让所有已签发的 token 立即失效。
+
+---
 
 ---
 

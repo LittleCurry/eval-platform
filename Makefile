@@ -1,6 +1,6 @@
 .PHONY: help up-deps down-deps ps api api-restart api-logs api-stop \
         migrate-up migrate-down migrate-version \
-        migrate-create worker-setup worker-test worker-lint worker-healthcheck \
+        migrate-create worker-setup worker-test worker-lint worker-healthcheck jwt-secret \
         attribution drill drill-compare compare parallel-demo test test-live lint verify
 
 help: ## 显示可用目标
@@ -17,7 +17,14 @@ ps: ## 查看依赖服务状态
 	docker compose ps
 
 # ---- Go API ----
+
+# 本地配置统一从 .env 取: docker compose 会自动读它, 但 Go API 不会。
+# 不 source 的后果是"JWT_SECRET 只在某个终端里 export 过", 换个窗口就启动不了 ——
+# 这类"环境不对"的问题最难查, 所以在这里显式加载一次。
+ENV_FILE ?= .env
+
 api: ## 本地运行 Go API (前台, 先 make up-deps)
+	@set -a; if [ -f $(ENV_FILE) ]; then . ./$(ENV_FILE); fi; set +a; \
 	cd server && go run ./cmd/api
 
 # 开发期最常踩的坑: 旧实例还占着端口, 新实例启动即失败(日志里是 bind: address already in use),
@@ -42,13 +49,17 @@ api-restart: ## 重启本地 API(按端口杀旧实例 + 后台起 + 等 healthz
 	  pids=$$(lsof -nP -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
 	  if [ -n "$$pids" ]; then echo "仍在监听, 强制结束: $$pids"; kill -9 $$pids 2>/dev/null || true; sleep 1; fi; \
 	else echo "端口 $$port 空闲(无需清理)"; fi; \
-	( cd server && nohup go run ./cmd/api </dev/null >/tmp/eval-api.log 2>&1 & ); \
+	( set -a; if [ -f $(ENV_FILE) ]; then . ./$(ENV_FILE); fi; set +a; \
+	  cd server && nohup go run ./cmd/api </dev/null >/tmp/eval-api.log 2>&1 & ); \
 	echo "已后台启动, 日志: /tmp/eval-api.log"
 	@i=0; while [ $$i -lt 30 ]; do i=$$((i+1)); \
 	  if curl -sf -m 2 http://127.0.0.1:$(API_PORT)/healthz >/dev/null 2>&1; then \
 	    echo "✅ API 就绪: http://127.0.0.1:$(API_PORT)"; exit 0; fi; \
 	  sleep 1; done; \
 	echo "❌ 30 秒内未就绪, 日志尾部:"; tail -10 /tmp/eval-api.log; exit 1
+
+jwt-secret: ## 生成一个可用的 JWT_SECRET(填进 .env 的 JWT_SECRET=)
+	@openssl rand -base64 48
 
 api-logs: ## 查看后台 API 日志尾部: make api-logs [N=30]
 	tail -n $(or $(N),30) /tmp/eval-api.log

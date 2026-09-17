@@ -3,6 +3,25 @@
 
 const BASE = import.meta.env.VITE_API_BASE ?? '/api/v1'
 
+// ---- 会话注入(M7-1) ----
+//
+// 为什么用"注册回调"而不是在这里 import 会话模块: 会话模块要用 http 去请求 /auth/me,
+// 直接互相 import 会成环。改成 client 暴露两个小钩子, 由会话模块在初始化时挂上 ——
+// 依赖方向单向, 也不会因为循环 import 出现"运行时拿到 undefined"的怪问题。
+
+let tokenProvider: () => string | null = () => null
+let unauthorizedHandler: (() => void) | null = null
+
+/** 由会话模块注册: 每次请求时怎么取当前 token。 */
+export function setTokenProvider(provider: () => string | null) {
+    tokenProvider = provider
+}
+
+/** 由会话模块注册: 收到 401 时做什么(通常是清会话 + 跳登录页)。 */
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+    unauthorizedHandler = handler
+}
+
 export class ApiError extends Error {
     status: number
     constructor(status: number, message: string) {
@@ -16,7 +35,17 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
         'Content-Type': 'application/json',
         ...(options.headers as Record<string, string> | undefined),
     }
+    const token = tokenProvider()
+    if (token && !headers.Authorization) {
+        headers.Authorization = `Bearer ${token}`
+    }
     const res = await fetch(BASE + path, { ...options, headers })
+
+    // 401 = 没登录/登录失效: 交给会话模块统一处理(清 token + 跳登录页)。
+    // 注意**不处理 403**: 那是"登录了但没权限", 该由页面自己说明, 不能把人踢去登录。
+    if (res.status === 401 && unauthorizedHandler) {
+        unauthorizedHandler()
+    }
 
     if (res.status === 204) {
         return undefined as T

@@ -364,6 +364,34 @@ export interface RunJobRef {
     items: number
 }
 
+// ---- 认证与 RBAC(M7-1) ----
+
+export type Role = 'admin' | 'editor' | 'viewer'
+
+/**
+ * 账号信息。
+ *
+ * 刻意**不含 password_hash**: 后端把它标了 json:"-" 根本不返回,
+ * 前端类型也不给它留位置 —— 两处都不给, 才不会有人"顺手"展示它。
+ */
+export interface UserAccount {
+    id: number
+    email: string
+    name: string
+    role: Role
+    disabled: boolean
+    last_login_at?: string
+    created_at: string
+    updated_at: string
+}
+
+export interface SessionUser {
+    id: number
+    email: string
+    name: string
+    role: Role
+}
+
 // ---- 人工金标与 judge 校准(M6-3) ----
 
 /** 三值判定: "看不清"必须能表达 —— 逼标注员二选一, κ 会被瞎猜污染。 */

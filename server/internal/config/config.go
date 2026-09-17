@@ -16,6 +16,13 @@ type Config struct {
 	PGDB       string
 	QdrantURL  string
 
+	// 认证(M7-1): 无状态 JWT(HS256)。JWTSecret 为空且未显式关闭鉴权时, main 会拒绝启动 ——
+	// "忘了配密钥"绝不能悄悄退化成"没有鉴权"。
+	JWTSecret     string
+	TokenTTLHours int
+	// AuthDisabled 显式关闭鉴权(仅本地/演示)。开启时启动日志会大声警告。
+	AuthDisabled bool
+
 	// 向量模型信息(用于实验配置快照; 默认值与 .env.example / worker 侧保持一致)
 	EmbeddingProvider  string
 	EmbeddingBaseURL   string
@@ -55,6 +62,9 @@ func Load() Config {
 		PGPassword:         getenv("PG_PASSWORD", "eval_dev_password"),
 		PGDB:               getenv("PG_DB", "eval_platform"),
 		QdrantURL:          getenv("QDRANT_URL", "http://localhost:6333"),
+		JWTSecret:          getenv("JWT_SECRET", ""),
+		TokenTTLHours:      getenvInt("TOKEN_TTL_HOURS", 12),
+		AuthDisabled:       getenvBool("AUTH_DISABLED", false),
 		EmbeddingProvider:  getenv("EMBEDDING_PROVIDER", "siliconflow"),
 		EmbeddingBaseURL:   getenv("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1"),
 		EmbeddingModel:     getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),

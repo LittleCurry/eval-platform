@@ -78,12 +78,26 @@ export const routes: RouteRecordRaw[] = [
                 component: () => import('../views/CompareView.vue'),
                 meta: { title: 'A/B 对比' },
             },
+            {
+                path: 'forbidden',
+                name: 'forbidden',
+                component: () => import('../views/ForbiddenView.vue'),
+                meta: { title: '权限不足' },
+            },
+            {
+                path: 'users',
+                name: 'users',
+                component: () => import('../views/UsersView.vue'),
+                // M7-1: 只有管理员能进(服务端也会拦, 这里是为了不让人白点)
+                meta: { title: '用户管理', minRole: 'admin' },
+            },
         ],
     },
     {
         path: '/login',
         name: 'login',
         component: () => import('../views/LoginView.vue'),
-        meta: { title: '登录' },
+        // 公开页: 未登录也能进(否则登录页自己被守卫拦住就死循环了)
+        meta: { title: '登录', public: true },
     },
 ]
