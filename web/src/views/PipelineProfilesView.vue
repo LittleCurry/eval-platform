@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
@@ -33,7 +33,7 @@ import {
   updatePipelineProfile,
 } from '../api/pipelineProfiles'
 import type { PipelinePreview, PipelineProfile } from '../api/types'
-import { currentProjectId } from '../composables/useProject'
+import { currentProjectId, useProject } from '../composables/useProject'
 import { formatDateTime, shortHash } from '../utils/format'
 import {
   configToForm,
@@ -59,11 +59,18 @@ const previewDatasetId = ref<number | null>(null)
 const preview = ref<PipelinePreview | null>(null)
 const previewing = ref(false)
 
+const { hasProjects, emptyHint } = useProject()
+
 async function load() {
+  const projectId = currentProjectId.value
+  if (projectId === null) {
+    profiles.value = []
+    return
+  }
   loading.value = true
   errorText.value = ''
   try {
-    profiles.value = await listPipelineProfiles(currentProjectId.value)
+    profiles.value = await listPipelineProfiles(projectId)
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -72,10 +79,18 @@ async function load() {
 }
 
 async function loadTargets() {
+  const projectId = currentProjectId.value
+  if (projectId === null) {
+    corpora.value = []
+    datasets.value = []
+    previewCorpusId.value = null
+    previewDatasetId.value = null
+    return
+  }
   try {
     const [corpusList, datasetList] = await Promise.all([
-      listCorpora(currentProjectId.value),
-      listDatasets(currentProjectId.value),
+      listCorpora(projectId),
+      listDatasets(projectId),
     ])
     corpora.value = corpusList.map((item) => ({ label: `#${item.id} ${item.name}`, value: item.id }))
     datasets.value = datasetList.map((item) => ({ label: `#${item.id} ${item.name}`, value: item.id }))
@@ -87,6 +102,11 @@ async function loadTargets() {
 }
 
 onMounted(async () => {
+  await Promise.all([load(), loadTargets()])
+})
+
+// 切换项目后重新加载(M7-2): 模板与可选的语料/数据集都跟着项目走
+watch(currentProjectId, async () => {
   await Promise.all([load(), loadTargets()])
 })
 
@@ -129,9 +149,14 @@ async function submit() {
   formError.value = ''
   try {
     const config = formToConfig(form.value)
+    const projectId = currentProjectId.value
+    if (projectId === null) {
+      formError.value = '先建一个项目, 配置模板要挂在项目下'
+      return
+    }
     if (editingId.value === null) {
       await createPipelineProfile({
-        project_id: currentProjectId.value,
+        project_id: projectId,
         name: meta.value.name.trim(),
         description: meta.value.description.trim(),
         config,
@@ -237,6 +262,9 @@ const columns: DataTableColumns<PipelineProfile> = [
 
 <template>
   <div>
+    <NAlert v-if="!hasProjects" type="info" :show-icon="false" style="margin-bottom: 16px">
+      {{ emptyHint }}
+    </NAlert>
     <NCard title="配置模板" style="margin-bottom: 16px">
       <template #header-extra>
         <NSpace>

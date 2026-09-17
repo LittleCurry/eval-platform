@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
+import { h, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -16,20 +16,26 @@ import {
 } from 'naive-ui'
 import { createDataset, deleteDataset, listDatasets } from '../api/datasets'
 import type { Dataset } from '../api/types'
-import { currentProjectId } from '../composables/useProject'
+import { currentProjectId, useProject } from '../composables/useProject'
 
 const router = useRouter()
 const message = useMessage()
+const { hasProjects, emptyHint } = useProject()
 
 const datasets = ref<Dataset[]>([])
 const loading = ref(false)
 const errorText = ref('')
 
 async function load() {
+  const projectId = currentProjectId.value
+  if (projectId === null) {
+    datasets.value = []
+    return
+  }
   loading.value = true
   errorText.value = ''
   try {
-    datasets.value = await listDatasets(currentProjectId.value)
+    datasets.value = await listDatasets(projectId)
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -37,18 +43,25 @@ async function load() {
   }
 }
 onMounted(load)
+// 切换项目后重新加载(M7-2): 数据集属于项目, 看串项目等于看错实验
+watch(currentProjectId, load)
 
 const showCreate = ref(false)
 const createForm = ref({ name: '', description: '' })
 
 async function submitCreate() {
   const name = createForm.value.name.trim()
+  const projectId = currentProjectId.value
   if (!name) {
     message.warning('名称必填')
     return
   }
+  if (projectId === null) {
+    message.error('先建一个项目, 数据集要挂在项目下')
+    return
+  }
   try {
-    await createDataset({ project_id: currentProjectId.value, name, description: createForm.value.description })
+    await createDataset({ project_id: projectId, name, description: createForm.value.description })
     message.success('数据集已创建')
     showCreate.value = false
     createForm.value = { name: '', description: '' }
@@ -104,6 +117,9 @@ const columns: DataTableColumns<Dataset> = [
       <NButton type="primary" @click="showCreate = true">新建数据集</NButton>
     </template>
 
+      <NAlert v-if="!hasProjects" type="info" :show-icon="false" style="margin-bottom: 12px">
+        {{ emptyHint }}
+      </NAlert>
     <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">
       {{ errorText }}
     </NAlert>

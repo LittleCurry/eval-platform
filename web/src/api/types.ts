@@ -1,9 +1,18 @@
 // 与 Go 侧 json tag(snake_case)对齐的类型定义。
 
+/**
+ * 项目(M7-2): 数据隔离与归属的单位。
+ *
+ * D24 定的是"全员可见 + created_by 留痕" —— 所以既没有成员列表, 也没有
+ * "我能看哪些项目"的概念; 项目解决的是"数据别串台"和"出事找谁"。
+ */
 export interface Project {
     id: number
     name: string
     description?: string
+    created_by?: number
+    /** created_by 对应账号的邮箱(列表查询 JOIN 出来); M7 之前建的项目为空。 */
+    owner_email?: string
     created_at?: string
     updated_at?: string
 }

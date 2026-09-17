@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -18,6 +18,7 @@ import {
 } from 'naive-ui'
 import { getRunProgress, listRuns } from '../api/runs'
 import type { Run, RunProgress } from '../api/types'
+import { currentProjectId, useProject } from '../composables/useProject'
 import {
   formatDateTime,
   formatPercent,
@@ -31,6 +32,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const { hasProjects, emptyHint } = useProject()
 
 const runs = ref<Run[]>([])
 const progressMap = ref<Record<number, RunProgress>>({})
@@ -58,10 +60,21 @@ async function loadProgressOnly() {
 }
 
 async function load(withProgress = true) {
+  const projectId = currentProjectId.value
+  if (projectId === null) {
+    runs.value = []
+    progressMap.value = {}
+    return
+  }
   loading.value = true
   errorText.value = ''
   try {
-    runs.value = await listRuns({ datasetId: datasetFilter.value ?? undefined, limit: 50 })
+    // 按项目过滤(M7-2): 一次实验属于某个项目, 列表默认只看当前项目
+    runs.value = await listRuns({
+      projectId,
+      datasetId: datasetFilter.value ?? undefined,
+      limit: 50,
+    })
     if (withProgress) await loadProgressOnly()
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : String(err)
@@ -90,6 +103,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (timer !== undefined) window.clearInterval(timer)
 })
+
+// 切换项目后重新加载(含进度): 否则会看到别的项目的 run 列表
+watch(currentProjectId, () => void load())
 
 function renderProgress(row: Run) {
   const snapshot = progressMap.value[row.id]
@@ -167,6 +183,9 @@ const columns: DataTableColumns<Run> = [
 
 <template>
   <NCard title="评测运行">
+      <NAlert v-if="!hasProjects" type="info" :show-icon="false" style="margin-bottom: 12px">
+        {{ emptyHint }}
+      </NAlert>
     <template #header-extra>
       <NSpace align="center">
         <NButton size="small" @click="router.push('/compare')">A/B 对比</NButton>

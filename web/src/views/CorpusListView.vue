@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
+import { h, onMounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
@@ -27,19 +27,27 @@ import {
   type DocumentUploadItem,
 } from '../api/corpora'
 import type { Corpus, Document } from '../api/types'
-import { currentProjectId } from '../composables/useProject'
+import { currentProjectId, useProject } from '../composables/useProject'
 
 const message = useMessage()
+// M7-2: 当前项目来自真实项目列表(不再是写死的 1)
+const { hasProjects, emptyHint } = useProject()
 
 const corpora = ref<Corpus[]>([])
 const loading = ref(false)
 const errorText = ref('')
 
 async function load() {
+  const projectId = currentProjectId.value
+  if (projectId === null) {
+    // 一个项目都没有: 清空列表, 由模板里的引导提示兜住(别去请求一个不存在的项目)
+    corpora.value = []
+    return
+  }
   loading.value = true
   errorText.value = ''
   try {
-    corpora.value = await listCorpora(currentProjectId.value)
+    corpora.value = await listCorpora(projectId)
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -47,14 +55,21 @@ async function load() {
   }
 }
 onMounted(load)
+// 切换项目后必须重新加载: 否则界面还停在旧项目的语料上, 人会以为数据串了
+watch(currentProjectId, load)
 
 // ---- 新建语料库 ----
 const showCreate = ref(false)
 const createForm = ref({ name: '', source_type: 'manual' })
 
 async function submitCreate() {
+  const projectId = currentProjectId.value
+  if (projectId === null) {
+    message.error('先建一个项目, 语料库要挂在项目下')
+    return
+  }
   try {
-    await createCorpus({ project_id: currentProjectId.value, ...createForm.value })
+    await createCorpus({ project_id: projectId, ...createForm.value })
     message.success('语料库已创建')
     showCreate.value = false
     createForm.value = { name: '', source_type: 'manual' }
@@ -183,6 +198,9 @@ const docColumns: DataTableColumns<Document> = [
       <NButton type="primary" @click="showCreate = true">新建语料库</NButton>
     </template>
 
+      <NAlert v-if="!hasProjects" type="info" :show-icon="false" style="margin-bottom: 12px">
+        {{ emptyHint }}
+      </NAlert>
     <NAlert v-if="errorText" type="error" :show-icon="false" style="margin-bottom: 12px">
       {{ errorText }}
     </NAlert>
