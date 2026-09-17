@@ -682,9 +682,12 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 **任务清单**
 - [x] 登录/注册 + JWT + RBAC（admin/editor/viewer，权限落到 API 与前端路由）—— M7-1 完成，见下方小结
 - [x] project 隔离完善：成员管理、资源归属、跨 project 只读隔离校验 —— **M7-2 完成**（决策见 §4 D24：不建成员表，`created_by` + 全员可见）
-- [ ] UI 打磨：设计基线统一（空/载/错状态、表格、图表配色）、报告导出按钮、标注页体验
-- [ ] Docker Compose 一键部署（api+worker+web+pg+qdrant+可选 redis），`.env.example` 完整注释
-- [ ] 部署文档：内网机器三步启动、备份（PG dump + Qdrant snapshot）、升级流程
+- [~] UI 打磨：设计基线统一（空/载/错状态、表格、图表配色）、报告导出按钮、标注页体验
+      —— 已完成：①顶栏导航截断修复(导航独占一行, 实测 900px 以上 11 项全完整) ②只读账号写按钮置灰(含全局只读横幅)
+      ③统一三态组件 AsyncState(语料库/数据集已接入) ④报告导出(CSV/Markdown)
+      —— 未完成：其余列表页接入 AsyncState、图表配色统一、标注页快捷键提示的打磨（见 M7-3 小结的"未做"）
+- [x] Docker Compose 一键部署（api+worker+web+pg+qdrant+可选 redis），`.env.example` 完整注释 —— **M7-4 完成**
+- [x] 部署文档：内网机器三步启动、备份（PG dump + Qdrant snapshot）、升级流程 —— **M7-4 完成**（`docs/deploy.md` + `scripts/backup.sh`）
 - [ ] README 成稿：项目动机、架构图、指标口径、**参考调研章节（DeepEval/RAGAS 等对比与借鉴点，注明核心自研）**、demo 脚本
 - [ ] 全量测试回归 + 演示录制脚本（一步步讲：上传→评测→报告→对比→标注）
 - [ ] 找同事试用一轮，收集 3–5 个真实反馈并修掉高优项
@@ -732,6 +735,36 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 **未做/转出**
 - 项目改名/删除、成员/归属转移：M7-2 只做"归属留痕 + 隔离校验"；资源都挂在项目下，删除项目是危险动作，留到有真实需求时再设计（需要先决定级联还是迁移）。
 - 「谁的 run 谁改」这类**按人的**约束：与 D24 的"全员可见"取向冲突，不做。
+
+**M7-3 完成小结（2026-09-17，部分）：UI 打磨与只读体验**
+
+**做完了**（每条都有实测）：
+- **顶栏导航截断**（用户报的 bug）：根因不是"标签太多"，而是"标题 + 11 个页面 + 项目切换 + 角色 + 账号"约 1550px 挤在 64px 一行里。改成**导航独占第二行** + 收紧菜单项内边距 + 角色挪进账号下拉。无头 Chrome 实测：11 项自然宽 808px，**≥900px 全部标签完整无截断**；760/520px 下不截断而是横向可滚（naive-ui 会压缩菜单项把文字截成"…"，必须 `flex-shrink: 0` + 让菜单自己 `overflow-x: auto` —— 容器上设不生效，因为 `.n-menu` 自带 `overflow: hidden`）。
+- **只读账号按钮置灰**：新增 `composables/usePermission.ts`（前端权限统一出口）+ 布局顶部一条只读横幅；六个写页面的按钮 `:disabled`。实测：viewer 在标注工作台 **11 个按钮里 7 个禁用**且横幅可见；admin 同页 **0 个禁用、无横幅**。
+- **统一三态**：新增 `components/AsyncState.vue`（骨架屏 / 错误+重试 / 空态三态收敛到一处），语料库与数据集列表已接入 —— 以前"没有数据"和"请求失败"在界面上长得一样。
+- **报告导出**：`buildReportCsv`（概况/指标/归因标签/逐题明细四段）+ `buildReportMarkdown`（只放结论级内容），复用对比页的 CSV 转义约定；报告页头部下拉导出；10 条测试（含"没判定显示 — 而不是 0/0/0"这类口径）。
+- **菜单防回归**：菜单抽成 `utils/navigation.ts` 纯数据，配 11 条测试做**双向对照**（该进菜单的路由一个都不能漏 / 菜单 key 必须有对应路由 / 按角色过滤 / 项数与标签宽度预警线）。
+
+**未做（转出到下一批）**：其余列表页接入 AsyncState、图表配色统一、标注页快捷键提示打磨、报告页表格列宽再收一遍。
+
+**M7-4 完成小结（2026-09-17）：全栈一键部署**
+
+**交付物**：`compose.yaml`（六服务：postgres / qdrant / **migrate** / api / worker / web）、`server/Dockerfile`、`worker/Dockerfile`、`web/Dockerfile` + `web/nginx.conf`、`scripts/backup.sh`、`docs/deploy.md`、Makefile 的 `deploy-*` 与 `backup`、`.env.example` 部署段。
+
+**关键设计**：
+- **migrate 单独成服务**（跑完即退出）：API 运行时不该有改表结构的权限；迁移失败就卡在这一步，而不是让 API 带着半个 schema 起来。`depends_on: condition: service_completed_successfully` 把顺序做成硬约束。
+- **api 与 worker 分开打镜像**：依赖与扩缩容诉求完全不同（worker 要 Python + httpx + qdrant-client，且评测密集时只扩 worker）。
+- **只对外开一个入口**（nginx）：同源代理 `/api` 就不需要 CORS，前端也不必在构建时写死后端地址；nginx 里 `try_files ... /index.html` 让前端路由刷新不 404。
+- **web 镜像里跑 `pnpm build`**（含 vue-tsc）：类型不过 = 镜像构建失败。这条在本次开发中真的拦住过一次（我改到一半时的类型错误直接让镜像构建失败）。
+- **备份必须两份配对**：chunk 正文与向量只在 Qdrant（D17），只备 PG 恢复后检索跑不了、只备 Qdrant 则实验记录全无；`make backup` 一次产出 `eval-<时间戳>.sql.gz` + `qdrant-<时间戳>/`。
+
+**真机核对**：`docker compose up -d migrate api web` → migrate `no change`(已在版本 9)、api/web 均 healthy；经 nginx(8090) 验证 `/healthz`、`/`、`/login`、`/runs/155`（SPA 回落）全 200，`/api/v1/auth/status` 通、无 token 访问 `/api/v1/runs` 401；`docker compose run --rm worker python -m app.healthcheck` 全 ok，并用 worker 容器真跑完 **run #156（k=3，60/60 成功，recall 0.9097）** —— 正好补上 k=1(0.6736) 与 k=5(0.9486) 之间那一档，M6 闭环页有了"改配置重跑"的真实候选。
+
+**跑容器才暴露的两个真问题（值得记）**
+1. **worker 读的是单条 `PG_DSN`**，不是 `PG_HOST/PG_PORT/PG_USER/PG_PASSWORD` 那一组。按 api 那套配 worker，它会静默回落到默认 DSN（localhost:5432）然后连不上 —— 日志里只有 `connection refused`，很难猜到是变量名不对。健康检查（`app.healthcheck`）把它变成了"启动 5 秒内可见"。
+2. **镜像里不该信任宿主机的文件权限**：仓库里有个文件是 `0600`（其他都是 0644，应该是某次受限 umask 创建的），`COPY` 原样保留，于是非 root 的 worker 用户连"读自己代码"都被拒（`PermissionError: /app/app/generation/__init__.py`）。镜像里统一 `chown -R worker:worker /app && chmod -R a+rX /app` 兜底。
+
+**未做/转出**：HTTPS/域名与反向代理（`docs/deploy.md` 里给了指引，没做成 compose 里的服务）；镜像发布到私仓（现在是本地 build）；多副本 worker 的编排示例。
 
 ---
 
