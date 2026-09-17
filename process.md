@@ -113,7 +113,7 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 | 表 | 用途 | 关键字段 |
 |----|------|----------|
 | `users` | 登录、角色（M7-1 落地） | email(唯一, 强制小写), name, password_hash(bcrypt), role(admin/editor/viewer), disabled, last_login_at |
-| `projects` | 数据隔离命名空间（同事共用） | name, created_by |
+| `projects` | 数据隔离与归属单位（M7-2 落地；**全员可见**，见 D24） | name(唯一), description, created_by → users(id) |
 | `corpora` | 语料库 | project_id, name, source_type |
 | `documents` | 语料原文（清洗后） | corpus_id, title, raw_text, meta jsonb |
 | `chunk_meta` | chunk 元信息（向量在 Qdrant） | doc_id, chunk_idx, char_start, char_end, chunking_hash, qdrant_point_id |
@@ -386,6 +386,22 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 - **为什么路由按权限分组**：这样"这个端点谁能用"在路由表上一眼可见，新加端点必须选一个组；漏选不会被静默放过 —— `TestEveryAPIRouteRequiresToken` 会把路由表里每个非公开端点打一遍，要求无 token 时全是 401。
 - **401 与 403 严格分开**：401 = 没登录/失效（前端跳登录页并带回跳地址）；403 = 登录了但没权限（前端**留在原地**说明缺什么权限）。混用会让"权限不足"表现成反复跳登录页，用户永远不知道自己只是没权限。
 - **前端的权限只负责"不让人白点"**：菜单按角色裁剪、路由守卫拦角色不足的页面、禁掉自己改自己的角色选择。真正的边界在服务端 —— 两边各有一份实现且有各自的测试。
+
+---
+
+### D24 项目不建成员表：`created_by` 留痕 + 全员可见，隔离靠"项目内一致性"
+
+**决策**：项目**不做成员表、不做按人可见的权限**。所有登录用户都能看到所有项目；项目解决的是另外两件事：
+① **数据不串台** —— 语料/数据集/run 都归属某个项目，页面看的是"当前项目"的东西；
+② **归属留痕** —— 谁建的项目/数据集/语料写进 `created_by`（列表带出 `owner_email`），出事找得到人。
+
+隔离的硬规则只有一条，写在**创建 run 的同一个事务**里：**一次 run 的 `dataset_id` 与 `corpus_id` 必须同属一个项目**，显式传的 `project_id` 也必须与两者一致，否则 `ErrProjectMismatch` → 400。
+
+- **为什么不建成员表**：内部工具、十来个同事、项目数量个位数 —— 成员表的收益（按人授权）远小于它的成本（多一张表 + 每个查询都要带上成员判断 + 谁都可能忘了判）。等真的出现"某个项目不该给所有人看"的需求再说，那时加一张表也不迟。
+- **为什么"跨项目混用"必须拦**：这是**静默错误** —— 指标照样算得出来、报告照样好看，但那是两个项目的数据拼出来的数；而且它不报错，只有人肉核对才会发现。放进事务里判定（而不是 handler 先查两遍），是为了消灭"校验通过之后、插入之前"被改掉的窗口。
+- **为什么归属要显示邮箱**：全员可见意味着"谁能看"不再是控制手段，那么**责任**就成了唯一的约束 —— 项目列表里能直接看到创建者，比一个裸露的 `created_by=3` 有用得多。M7 之前建的项目 `created_by` 为 NULL，前端显示「创建者未知（M7 之前建立的项目）」，不留空白。
+- **前端的项目上下文**：`currentProjectId` 从"写死 1"变成"真实项目列表 + 用户上次的选择（localStorage）"；记住的项目被删时**回退到第一个并明确提示**（静默换项目会让人以为在看 A、其实在看 B）；切换项目后各页面 `watch` 重新加载，否则界面还停在旧项目的数据上。
+- **新部署的空项目引导**：库里一个项目都没有时，顶栏显示「建第一个项目」（仅管理员），各列表页显示引导文案 —— 否则装完系统连语料库都建不了（`project_id` 必填）。
 
 ---
 
@@ -665,7 +681,7 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 
 **任务清单**
 - [x] 登录/注册 + JWT + RBAC（admin/editor/viewer，权限落到 API 与前端路由）—— M7-1 完成，见下方小结
-- [ ] project 隔离完善：成员管理、资源归属、跨 project 只读隔离校验
+- [x] project 隔离完善：成员管理、资源归属、跨 project 只读隔离校验 —— **M7-2 完成**（决策见 §4 D24：不建成员表，`created_by` + 全员可见）
 - [ ] UI 打磨：设计基线统一（空/载/错状态、表格、图表配色）、报告导出按钮、标注页体验
 - [ ] Docker Compose 一键部署（api+worker+web+pg+qdrant+可选 redis），`.env.example` 完整注释
 - [ ] 部署文档：内网机器三步启动、备份（PG dump + Qdrant snapshot）、升级流程
@@ -699,6 +715,23 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 - project 级成员隔离（谁能看哪个项目）是 **M7-2**，本轮只到"角色级"权限。
 
 > ⚠️ 本地 `.env` 里由本轮写入了一个开发用 `JWT_SECRET`（该文件已被 gitignore）。**部署到别处必须用 `make jwt-secret` 重新生成**；轮换它会让所有已签发的 token 立即失效。
+
+**M7-2 完成小结（2026-09-17）：项目归属与跨项目隔离**
+
+**交付物**：`store/project.go`（`GetProject` + 创建记 owner + 列表/详情 LEFT JOIN 出 `owner_email`）、`corpus.go`/`dataset.go`（创建记 owner）、`queue.go`（**事务内**的项目一致性校验 + `ErrProjectMismatch`）、`http/projects.go`（新增 `GET /projects/:id`）、三个创建接口传当前登录用户；前端 `api/projects.ts`、`utils/projectContext.ts`（纯逻辑 + 21 条测试）、`composables/useProject.ts`（真实项目 + 记住选择 + 回退提示）、顶栏项目切换器与「建第一个项目」、四个列表页按项目过滤并在切换后重载。**无需迁移** —— `projects/corpora/datasets` 的 `created_by` 列 M1 就有了，缺的只是"往里写"和"往里拦"。
+
+**真机核对**：建项目返回 `created_by` + `owner_email`；`GET /projects/:id` 200 / 不存在 404 / 非法 id 400；viewer 能读项目列表但拿不到 `/users`；**数据集 A + 语料 B → 400「不属于同一个项目…一次实验只能在一个项目内进行」**；显式 `project_id` 与数据来源不一致同样 400；同项目但空数据集则走到「评测集没有用例」（说明前一道校验通过了）；被拒绝的提交**零残骸**（事务回滚）。
+
+**测试**：Go 新增 **14 条**（`isolation_test.go` 5 条 + `isolation_live_test.go` 3 条真库 + 若干 stub 断言），web 新增 **21 条**；全量 worker 292 / Go 五包 / web 209 全绿。
+
+**踩坑记录（三条，都已用测试钉住）**
+1. **`ListDatasets` 的 SELECT/Scan 列数不匹配**：给查询加了 `d.created_by` 却忘了给 `Scan` 加参数 —— **一调列表接口就报错**，而 `go test`/`vue-tsc` 全绿也照样漏（HTTP 测试用 stub，SQL 没人真跑）。只有 `RUN_LIVE=1` 的真库用例能发现；修完后把这条断言写进了 `TestLiveOwnershipRecorded`。
+2. **`CreateProject` 的创建响应缺 owner**：只 `RETURNING` 原始列就不带 JOIN 出来的 `owner_email`，同一个字段"列表里有、创建后没有"会让人以为写入失败。改成"插入拿 id → 用带 JOIN 的读法回读整行"。
+3. **队列 live 测试会误伤真实任务**（这组测试操作的是**全局队列**）：`TestQueueClaimWhenEmptyLive` 会把队列里的 pending 任务领走并标成 `failed` —— 你从页面提交的评测如果正好在队列里，就会被测试"跑失败"；并发领取测试则会把真实任务抢成 `running` 后不管（页面上永远停在"运行中"）。我实际撞上了：run #156 被抢成 running、还有一条测试因为队列非空而静默 `SKIP`（等于悄悄少跑一条）。现在加了 `requireExclusiveQueue` 守卫：**队列里有别人的任务就跳过，并打印"先 make worker 跑完再回来"** —— 既不误伤真实任务，也不静默少跑。
+
+**未做/转出**
+- 项目改名/删除、成员/归属转移：M7-2 只做"归属留痕 + 隔离校验"；资源都挂在项目下，删除项目是危险动作，留到有真实需求时再设计（需要先决定级联还是迁移）。
+- 「谁的 run 谁改」这类**按人的**约束：与 D24 的"全员可见"取向冲突，不做。
 
 ---
 
