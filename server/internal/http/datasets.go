@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"eval-platform/server/internal/auth"
 	"eval-platform/server/internal/store"
 )
 
@@ -55,8 +56,9 @@ func (h *datasetHandler) Create(c *gin.Context) {
 		return
 	}
 
+	actor, _ := auth.CurrentUser(c)
 	ds, err := h.store.CreateDataset(c.Request.Context(),
-		req.ProjectID, req.Name, strings.TrimSpace(req.Description))
+		req.ProjectID, req.Name, strings.TrimSpace(req.Description), actor.ID)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound):

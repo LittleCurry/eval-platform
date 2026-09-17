@@ -30,16 +30,18 @@ func (p *Postgres) ListCorpora(ctx context.Context, projectID int64) ([]Corpus, 
 
 // CreateCorpus 创建语料库; sourceType 为空时使用 manual。
 // 项目不存在 → ErrNotFound; 同项目重名 → ErrConflict。
-func (p *Postgres) CreateCorpus(ctx context.Context, projectID int64, name, sourceType string) (Corpus, error) {
+func (p *Postgres) CreateCorpus(
+	ctx context.Context, projectID int64, name, sourceType string, createdBy int64,
+) (Corpus, error) {
 	if sourceType == "" {
 		sourceType = "manual"
 	}
 	var c Corpus
 	err := p.db.QueryRowContext(ctx, `
-		INSERT INTO corpora (project_id, name, source_type)
-		VALUES ($1, $2, $3)
+		INSERT INTO corpora (project_id, name, source_type, created_by)
+		VALUES ($1, $2, $3, NULLIF($4::bigint, 0))
 		RETURNING id, project_id, name, source_type, created_by, created_at, updated_at`,
-		projectID, name, sourceType,
+		projectID, name, sourceType, createdBy,
 	).Scan(&c.ID, &c.ProjectID, &c.Name, &c.SourceType, &c.CreatedBy,
 		&c.CreatedAt, &c.UpdatedAt)
 	if err != nil {

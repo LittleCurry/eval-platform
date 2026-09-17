@@ -67,14 +67,40 @@ func (p *Postgres) CreateRunWithJob(ctx context.Context, in CreateRunInput) (Run
 	}
 	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是空操作
 
-	var datasetExists bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM datasets WHERE id = $1)`, in.DatasetID).Scan(&datasetExists); err != nil {
-		return ref, err
-	}
-	if !datasetExists {
+	// 归属校验(M7-2): 一次 run 的**数据集与语料必须同属一个项目**。
+	//
+	// 为什么在事务里查、而不是让 handler 先查两遍: 这是写入时的数据不变量 ——
+	// 放在同一个事务里, 才不会出现"校验通过之后、插入之前"被别人改掉项目的窗口。
+	// 跨项目混用是"静默错误": 指标照样算得出来, 但那是两个项目的数据拼出来的数。
+	var datasetProject int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT project_id FROM datasets WHERE id = $1`, in.DatasetID).Scan(&datasetProject)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ref, ErrNotFound
 	}
+	if err != nil {
+		return ref, err
+	}
+
+	var corpusProject int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT project_id FROM corpora WHERE id = $1`, in.CorpusID).Scan(&corpusProject)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ref, ErrNotFound
+	}
+	if err != nil {
+		return ref, err
+	}
+
+	if datasetProject != corpusProject {
+		return ref, ErrProjectMismatch
+	}
+	// handler 显式给了 project_id 时, 它也必须与数据来源一致, 否则这次 run 会被
+	// 记到另一个项目名下 —— 报告页按项目筛选时就会"找不到自己刚跑的 run"。
+	if in.ProjectID > 0 && in.ProjectID != datasetProject {
+		return ref, ErrProjectMismatch
+	}
+	in.ProjectID = datasetProject
 
 	// 先数用例: 为空直接拒绝; 非空则用它初始化 job.progress(前端一创建就能看到 0/N)
 	var caseCount int64

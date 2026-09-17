@@ -16,13 +16,22 @@ import (
 type stubProjectStore struct {
 	createErr error
 	created   *store.Project
+	// gotCreatedBy 记录 handler 传下来的创建者 id(M7-2: 归属必须落库)
+	gotCreatedBy int64
 }
 
 func (s *stubProjectStore) ListProjects(ctx context.Context) ([]store.Project, error) {
 	return nil, nil
 }
 
-func (s *stubProjectStore) CreateProject(ctx context.Context, name, desc string) (store.Project, error) {
+func (s *stubProjectStore) GetProject(ctx context.Context, id int64) (store.Project, error) {
+	return store.Project{}, store.ErrNotFound
+}
+
+func (s *stubProjectStore) CreateProject(
+	ctx context.Context, name, desc string, createdBy int64,
+) (store.Project, error) {
+	s.gotCreatedBy = createdBy
 	if s.createErr != nil {
 		return store.Project{}, s.createErr
 	}
@@ -41,7 +50,9 @@ func (s *stubCorpusStore) ListCorpora(ctx context.Context, projectID int64) ([]s
 	return nil, nil
 }
 
-func (s *stubCorpusStore) CreateCorpus(ctx context.Context, projectID int64, name, sourceType string) (store.Corpus, error) {
+func (s *stubCorpusStore) CreateCorpus(
+	ctx context.Context, projectID int64, name, sourceType string, createdBy int64,
+) (store.Corpus, error) {
 	if s.createErr != nil {
 		return store.Corpus{}, s.createErr
 	}

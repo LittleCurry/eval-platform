@@ -83,6 +83,7 @@ func NewRouter(d Deps) *gin.Engine {
 	// read: 所有已登录用户(含 viewer)
 	read := authed.Group("")
 	read.GET("/projects", projects.List)
+	read.GET("/projects/:id", projects.Get)
 	read.GET("/corpora", corpora.List)
 	read.GET("/corpora/:id", corpora.Get)
 	read.GET("/corpora/:id/documents", documents.List)

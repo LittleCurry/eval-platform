@@ -10,12 +10,14 @@ import (
 
 type ProjectStore interface {
 	ListProjects(ctx context.Context) ([]store.Project, error)
-	CreateProject(ctx context.Context, name, description string) (store.Project, error)
+	GetProject(ctx context.Context, id int64) (store.Project, error)
+	// createdBy = 当前登录用户 id(M7-2); 0 表示匿名(测试), 落库为 NULL
+	CreateProject(ctx context.Context, name, description string, createdBy int64) (store.Project, error)
 }
 
 type CorpusStore interface {
 	ListCorpora(ctx context.Context, projectID int64) ([]store.Corpus, error)
-	CreateCorpus(ctx context.Context, projectID int64, name, sourceType string) (store.Corpus, error)
+	CreateCorpus(ctx context.Context, projectID int64, name, sourceType string, createdBy int64) (store.Corpus, error)
 	GetCorpus(ctx context.Context, id int64) (store.Corpus, error)
 	UpdateCorpus(ctx context.Context, id int64, name, sourceType *string) (store.Corpus, error)
 	DeleteCorpus(ctx context.Context, id int64) error
@@ -30,7 +32,7 @@ type DocumentStore interface {
 
 type DatasetStore interface {
 	ListDatasets(ctx context.Context, projectID int64) ([]store.Dataset, error)
-	CreateDataset(ctx context.Context, projectID int64, name, description string) (store.Dataset, error)
+	CreateDataset(ctx context.Context, projectID int64, name, description string, createdBy int64) (store.Dataset, error)
 	GetDataset(ctx context.Context, id int64) (store.Dataset, error)
 	DeleteDataset(ctx context.Context, id int64) error
 }

@@ -22,7 +22,9 @@ func (s *stubDatasetStore) ListDatasets(ctx context.Context, projectID int64) ([
 	return nil, nil
 }
 
-func (s *stubDatasetStore) CreateDataset(ctx context.Context, projectID int64, name, description string) (store.Dataset, error) {
+func (s *stubDatasetStore) CreateDataset(
+	ctx context.Context, projectID int64, name, description string, createdBy int64,
+) (store.Dataset, error) {
 	if s.createErr != nil {
 		return store.Dataset{}, s.createErr
 	}

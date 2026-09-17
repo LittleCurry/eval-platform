@@ -280,6 +280,8 @@ func (h *runHandler) Submit(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	// project_id 不传时从数据集推导; 传了也在建 run 的事务里与数据来源核对(M7-2),
+	// 所以这里不再需要"信任前端传什么"。
 	projectID := req.ProjectID
 	if projectID <= 0 {
 		derived, err := h.store.GetDatasetProject(ctx, req.DatasetID)
@@ -329,6 +331,11 @@ func (h *runHandler) Submit(c *gin.Context) {
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			writeErr(c, http.StatusNotFound, "数据集不存在")
+		case errors.Is(err, store.ErrProjectMismatch):
+			// 跨项目混用是"静默错误": 指标照样算得出来, 但那是两个项目的数据拼出来的
+			writeErr(c, http.StatusBadRequest,
+				"数据集与语料不属于同一个项目(或 project_id 与它们不一致): "+
+					"一次实验只能在一个项目内进行, 否则报告里会出现来源不明的数字")
 		case strings.Contains(err.Error(), "没有用例"):
 			writeErr(c, http.StatusBadRequest, err.Error())
 		default:

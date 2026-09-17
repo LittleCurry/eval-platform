@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"eval-platform/server/internal/auth"
 	"eval-platform/server/internal/store"
 )
 
@@ -79,7 +80,8 @@ func (h *corpusHandler) Create(c *gin.Context) {
 		return
 	}
 
-	co, err := h.store.CreateCorpus(c.Request.Context(), req.ProjectID, req.Name, req.SourceType)
+	actor, _ := auth.CurrentUser(c)
+	co, err := h.store.CreateCorpus(c.Request.Context(), req.ProjectID, req.Name, req.SourceType, actor.ID)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound):

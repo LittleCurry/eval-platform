@@ -9,16 +9,24 @@ import (
 var (
 	ErrNotFound = errors.New("record not found")
 	ErrConflict = errors.New("record conflicts with existing data")
+	// ErrProjectMismatch 一次 run 的数据集与语料不属于同一个项目(M7-2)。
+	//
+	// 为什么做成领域错误、而不是让 handler 自己查两遍: 这条规则是**写入时的数据不变量**,
+	// 必须在创建 run 的同一个事务里判定 —— 否则并发下仍可能插进去一个"跨项目的 run"。
+	ErrProjectMismatch = errors.New("数据集与语料不属于同一个项目")
 )
 
 // Project 对应 projects 表。
 type Project struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	CreatedBy   *int64    `json:"created_by,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CreatedBy   *int64 `json:"created_by,omitempty"`
+	// OwnerEmail 是 created_by 对应账号的邮箱(列表查询里 JOIN 出来)。
+	// 项目是隔离单位, "出事找谁"必须一眼看得见 —— 只给一个数字 id 等于没给。
+	OwnerEmail string    `json:"owner_email,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Corpus 对应 corpora 表。
@@ -50,6 +58,7 @@ type Dataset struct {
 	ProjectID   int64     `json:"project_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
+	CreatedBy   *int64    `json:"created_by,omitempty"`
 	CaseCount   int64     `json:"case_count,omitempty"` // 列表/详情附带
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
