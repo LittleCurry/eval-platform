@@ -1,5 +1,14 @@
 name: eval-platform
 
+# 一条命令起全栈(M7-4): `docker compose up -d --build`
+#
+# 本地开发的两个习惯不受影响:
+#   * 只想起依赖库:      docker compose up -d postgres qdrant
+#   * 前后端在宿主机跑:   make api-restart / make web(那时用不到 api/worker/web 三个容器)
+#
+# 启动顺序由 depends_on + 健康检查保证: postgres 健康 -> migrate 跑完 -> api/worker 起。
+# 这样"API 起来时表一定已经建好", 不需要在 API 里写重试等待迁移的逻辑。
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -9,7 +18,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eval_dev_password}
       POSTGRES_DB: ${POSTGRES_DB:-eval_platform}
     ports:
-      - "5432:5432"
+      # 宿主端口变量刻意不叫 PG_PORT: 那是 Go API 读的"数据库端口", 两者含义不同,
+      # 同名会让人以为改一处就同时改了映射与连接目标
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -23,16 +34,133 @@ services:
     image: qdrant/qdrant:v1.19.1
     container_name: eval-qdrant
     ports:
-      - "6333:6333" # REST
-      - "6334:6334" # gRPC
+      - "${QDRANT_PORT:-6333}:6333" # REST
+      - "${QDRANT_GRPC_PORT:-6334}:6334" # gRPC
     volumes:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
 
-  # redis: # M3 异步任务基建可选旁路(缓存/限流/进度推送)，需要时取消注释
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
+  # 迁移只跑一次就退出: 用官方 migrate 镜像 + 挂载仓库里的 SQL, 不把迁移能力塞进 API 镜像
+  # (API 运行时不该有改表结构的权限)。
+  migrate:
+    image: migrate/migrate:v4.18.1
+    container_name: eval-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./server/migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER:-eval}:${POSTGRES_PASSWORD:-eval_dev_password}@postgres:5432/${POSTGRES_DB:-eval_platform}?sslmode=disable"
+      - "up"
+    restart: "no"
+
+  api:
+    build:
+      context: ./server
+    image: eval-platform-api:local
+    container_name: eval-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # 容器内一律走服务名, 不用 localhost
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: ${POSTGRES_USER:-eval}
+      PG_PASSWORD: ${POSTGRES_PASSWORD:-eval_dev_password}
+      PG_DB: ${POSTGRES_DB:-eval_platform}
+      QDRANT_URL: http://qdrant:6333
+      # 认证(M7-1): 密钥必填, 缺失则 API 拒绝启动(fail-fast 而不是变成免登录)
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET 必填 —— 先 make jwt-secret 并把值写进 .env}"
+      TOKEN_TTL_HOURS: ${TOKEN_TTL_HOURS:-12}
+      AUTH_DISABLED: ${AUTH_DISABLED:-false}
+      # 下面这些是"提交 run 时未给出字段"的默认值, 会写进配置快照(D14) —— 必须与 worker 一致
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-siliconflow}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://api.siliconflow.cn/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-16}
+      GENERATION_PROVIDER: ${GENERATION_PROVIDER:-siliconflow}
+      GENERATION_BASE_URL: ${GENERATION_BASE_URL:-https://api.siliconflow.cn/v1}
+      GENERATION_MODEL: ${GENERATION_MODEL:-deepseek-ai/DeepSeek-V3.2}
+      GENERATION_PROMPT_ID: ${GENERATION_PROMPT_ID:-qa_zh_v1}
+      GENERATION_TEMPERATURE: ${GENERATION_TEMPERATURE:-0}
+      GENERATION_MAX_TOKENS: ${GENERATION_MAX_TOKENS:-512}
+      GENERATION_MAX_CONTEXT_CHARS: ${GENERATION_MAX_CONTEXT_CHARS:-3000}
+      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-siliconflow}
+      JUDGE_BASE_URL: ${JUDGE_BASE_URL:-https://api.siliconflow.cn/v1}
+      JUDGE_MODEL: ${JUDGE_MODEL:-deepseek-ai/DeepSeek-V3.2}
+      JUDGE_CLAIMS_PROMPT_ID: ${JUDGE_CLAIMS_PROMPT_ID:-judge_claims_zh_v1}
+      JUDGE_RUBRIC_PROMPT_ID: ${JUDGE_RUBRIC_PROMPT_ID:-judge_rubric_zh_v2}
+      JUDGE_TEMPERATURE: ${JUDGE_TEMPERATURE:-0}
+      JUDGE_MAX_TOKENS: ${JUDGE_MAX_TOKENS:-1024}
+      JUDGE_MAX_CONTEXT_CHARS: ${JUDGE_MAX_CONTEXT_CHARS:-3000}
+      JUDGE_ENABLE_RUBRIC: ${JUDGE_ENABLE_RUBRIC:-true}
+      JUDGE_MAX_CLAIMS: ${JUDGE_MAX_CLAIMS:-12}
+    # 默认只经 nginx 暴露(同源, 无需 CORS)。要直接在宿主机调 API 时取消注释:
+    # ports:
+    #   - "${API_PORT:-18080}:8080"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./worker
+    image: eval-platform-worker:local
+    container_name: eval-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # 注意: worker 读的是**单条 DSN**(worker/app/config.py 的 pg_dsn), 不是 PG_HOST/PG_PORT 那一组
+      # —— 实测过一次: 按 api 那套给 worker 配, 它会静默回落到默认 DSN(localhost:5432)然后连不上,
+      # 日志里只看到"connection refused", 很难猜到是变量名不对。
+      PG_DSN: postgresql://${POSTGRES_USER:-eval}:${POSTGRES_PASSWORD:-eval_dev_password}@postgres:5432/${POSTGRES_DB:-eval_platform}
+      QDRANT_URL: http://qdrant:6333
+      # 真实调用 LLM 的是 worker: key 只给它, api 不需要(SILICONFLOW_API_KEY 同时用于 embedding/generation/judge)
+      SILICONFLOW_API_KEY: "${SILICONFLOW_API_KEY:?SILICONFLOW_API_KEY 必填 —— embedding/generation/judge 都用它}"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-16}
+      GENERATION_MODEL: ${GENERATION_MODEL:-deepseek-ai/DeepSeek-V3.2}
+      GENERATION_PROMPT_ID: ${GENERATION_PROMPT_ID:-qa_zh_v1}
+      GENERATION_MAX_TOKENS: ${GENERATION_MAX_TOKENS:-512}
+      GENERATION_MAX_CONTEXT_CHARS: ${GENERATION_MAX_CONTEXT_CHARS:-3000}
+      GENERATION_MAX_RETRIES: ${GENERATION_MAX_RETRIES:-2}
+      JUDGE_MODEL: ${JUDGE_MODEL:-deepseek-ai/DeepSeek-V3.2}
+      JUDGE_CLAIMS_PROMPT_ID: ${JUDGE_CLAIMS_PROMPT_ID:-judge_claims_zh_v1}
+      JUDGE_RUBRIC_PROMPT_ID: ${JUDGE_RUBRIC_PROMPT_ID:-judge_rubric_zh_v2}
+      JUDGE_MAX_TOKENS: ${JUDGE_MAX_TOKENS:-1024}
+      JUDGE_MAX_CONTEXT_CHARS: ${JUDGE_MAX_CONTEXT_CHARS:-3000}
+      JUDGE_ENABLE_RUBRIC: ${JUDGE_ENABLE_RUBRIC:-true}
+      JUDGE_MAX_CLAIMS: ${JUDGE_MAX_CLAIMS:-12}
+      JUDGE_USE_CACHE: ${JUDGE_USE_CACHE:-true}
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+    image: eval-platform-web:local
+    container_name: eval-web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # 唯一对外入口: 8080(与你本地 go run 的 API 端口相同, 所以本地开发时别同时起这个容器,
+      # 或改 WEB_PORT=8090)
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
 
 volumes:
   pgdata:

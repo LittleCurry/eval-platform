@@ -1,6 +1,7 @@
 .PHONY: help up-deps down-deps ps api api-restart api-logs api-stop \
         migrate-up migrate-down migrate-version \
         migrate-create worker-setup worker-test worker-lint worker-healthcheck jwt-secret \
+        deploy-up deploy-down deploy-logs deploy-ps deploy-build backup \
         attribution drill drill-compare compare parallel-demo test test-live lint verify
 
 help: ## 显示可用目标
@@ -67,6 +68,37 @@ api-logs: ## 查看后台 API 日志尾部: make api-logs [N=30]
 api-stop: ## 停掉本地 API(只杀监听该端口的进程)
 	@pids=$$(lsof -nP -ti tcp:$(API_PORT) -sTCP:LISTEN 2>/dev/null || true); \
 	if [ -n "$$pids" ]; then kill $$pids 2>/dev/null || true; echo "已停止: $$pids"; else echo "端口 $(API_PORT) 上没有监听进程"; fi
+
+# ---- 全栈部署 (M7-4): 见 docs/deploy.md ----
+#
+# 与本地开发的关系: 本地开发用 make api-restart / make web(宿主机跑, 便于热重载);
+# 部署用这里的 deploy-*, 六个服务全在容器里, 只对外开 WEB_PORT(默认 8080)。
+# 两者可以共存, 但别让 WEB_PORT 与本地 API 的 8080 撞车。
+
+deploy-build: ## 只构建镜像(不启动): make deploy-build
+	docker compose build api worker web
+
+deploy-up: ## 一键起全栈(构建 + 迁移 + 等就绪): make deploy-up [WEB_PORT=8080]
+	@test -f .env || (echo "缺少 .env: 先 cp .env.example .env 并填 JWT_SECRET / SILICONFLOW_API_KEY"; exit 1)
+	docker compose up -d --build
+	@echo "等待 web 就绪…"
+	@i=0; while [ $$i -lt 60 ]; do i=$$((i+1)); \
+	  if curl -sf -m 2 http://127.0.0.1:$(or $(WEB_PORT),8080)/healthz >/dev/null 2>&1; then \
+	    echo "✅ 已就绪: http://127.0.0.1:$(or $(WEB_PORT),8080)  (首次打开会引导创建管理员)"; exit 0; fi; \
+	  sleep 1; done; \
+	echo "❌ 60 秒内未就绪, 看日志: make deploy-logs"; exit 1
+
+deploy-ps: ## 查看全栈服务状态
+	docker compose ps
+
+deploy-logs: ## 跟踪全栈日志: make deploy-logs [SVC=api]
+	docker compose logs -f --tail=100 $(SVC)
+
+deploy-down: ## 停止全栈(保留数据卷)
+	docker compose down
+
+backup: ## 备份数据库 + 向量库快照(两份必须配对): make backup [BACKUP_DIR=backups]
+	@scripts/backup.sh $(or $(BACKUP_DIR),backups)
 
 # ---- 数据库迁移 (golang-migrate) ----
 -include .env
