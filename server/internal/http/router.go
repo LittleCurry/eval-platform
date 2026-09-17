@@ -19,6 +19,8 @@ type Deps struct {
 	Runs           RunStore
 	QdrantPoints   QdrantPointStore
 	Profiles       PipelineProfileStore
+	Annotations    AnnotationStore
+	HumanGold      HumanGoldStore
 	EvalEmbedding  eval.EmbeddingConfig
 	EvalGeneration eval.GenerationConfig
 	EvalJudge      eval.JudgeConfig
@@ -44,6 +46,8 @@ func NewRouter(d Deps) *gin.Engine {
 	runContext := newRunContextHandler(d.Runs, d.QdrantPoints)
 	compare := newCompareHandler(d.Runs)
 	profiles := newPipelineProfileHandler(d.Profiles, d.EvalEmbedding, d.EvalGeneration, d.EvalJudge)
+	annotations := newAnnotationHandler(d.Annotations, d.Runs)
+	gold := newHumanGoldHandler(d.HumanGold, d.Runs)
 
 	v1 := r.Group("/api/v1")
 	v1.GET("/projects", projects.List)
@@ -83,5 +87,21 @@ func NewRouter(d Deps) *gin.Engine {
 	v1.PATCH("/pipeline-profiles/:id", profiles.Update)
 	v1.DELETE("/pipeline-profiles/:id", profiles.Delete)
 	v1.POST("/pipeline-preview", profiles.Preview)
+	// M6: Bad Case 标注(状态机在服务端) + 统计 + 归因建议
+	//   /annotation-stats 与 /annotation-suggestion 同样放顶层: 避开 :id 通配段冲突
+	v1.GET("/annotations", annotations.List)
+	v1.POST("/annotations", annotations.Upsert)
+	v1.PATCH("/annotations/:id", annotations.Update)
+	v1.DELETE("/annotations/:id", annotations.Delete)
+	v1.GET("/annotation-stats", annotations.Stats)
+	v1.GET("/annotation-suggestion", annotations.Suggestion)
+	// M6: 人工金标打分 + judge 校准报告
+	//   金标挂在 run 上(judge 判的是"这次 run 生成的那段答案"), 换 run 就要重标
+	//   /judge-calibration 放顶层: 同层不放静态段, 避免与 /human-gold/:id 的通配段冲突
+	v1.GET("/human-gold", gold.List)
+	v1.POST("/human-gold", gold.Upsert)
+	v1.PATCH("/human-gold/:id", gold.Update)
+	v1.DELETE("/human-gold/:id", gold.Delete)
+	v1.GET("/judge-calibration", gold.Calibration)
 	return r
 }

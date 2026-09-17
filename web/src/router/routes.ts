@@ -49,6 +49,12 @@ export const routes: RouteRecordRaw[] = [
                 meta: { title: '配置模板' },
             },
             {
+                path: 'annotations',
+                name: 'annotations',
+                component: () => import('../views/AnnotationWorkbenchView.vue'),
+                meta: { title: '标注工作台' },
+            },
+            {
                 path: 'compare',
                 name: 'compare',
                 component: () => import('../views/CompareView.vue'),

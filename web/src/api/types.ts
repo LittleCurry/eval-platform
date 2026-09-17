@@ -320,6 +320,41 @@ export interface ABReport {
     generation_note?: string
 }
 
+// ---- Bad Case 标注(M6) ----
+
+export type AnnotationStatus = 'open' | 'fixed' | 'verified' | 'wontfix'
+
+/** 人工确认的归因: 与 M4-3 的标签族对齐; '' = 还没归类。 */
+export type AnnotationReason = '' | 'retrieval' | 'hallucination' | 'generation' | 'dataset' | 'unknown'
+
+export interface Annotation {
+    id: number
+    project_id: number
+    run_id: number
+    case_id: number
+    status: AnnotationStatus
+    reason: AnnotationReason
+    comment: string
+    assignee: string
+    created_by: string
+    created_at: string
+    updated_at: string
+}
+
+export interface AnnotationStats {
+    total: number
+    by_status: Record<string, number>
+    by_reason: Record<string, number>
+}
+
+/** 归因建议: 由机器标签推导(flags[0] = 主因), 人工可以改成别的值。 */
+export interface AnnotationSuggestion {
+    reason: string
+    rationale: string
+    flags: string[]
+}
+
+
 // ---- 任务进度(jobs) ----
 
 export interface JobProgress {

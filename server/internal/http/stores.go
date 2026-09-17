@@ -72,6 +72,32 @@ type PipelineProfileStore interface {
 	DeletePipelineProfile(ctx context.Context, id int64) error
 }
 
+// AnnotationStore 是 Bad Case 标注的读写接口(M6)。
+type AnnotationStore interface {
+	ListAnnotations(ctx context.Context, f store.AnnotationFilter) ([]store.Annotation, error)
+	GetAnnotationByRunCase(ctx context.Context, runID, caseID int64) (store.Annotation, error)
+	CreateAnnotation(
+		ctx context.Context, projectID, runID, caseID int64,
+		status, reason, comment, assignee, createdBy string,
+	) (store.Annotation, error)
+	UpdateAnnotation(
+		ctx context.Context, id int64, status, reason, comment, assignee *string,
+	) (store.Annotation, error)
+	DeleteAnnotation(ctx context.Context, id int64) error
+	AggregateAnnotationStats(ctx context.Context, runID int64) (store.AnnotationStats, error)
+}
+
+// HumanGoldStore 是人工金标的读写接口(M6): 用来校准 judge 本身。
+type HumanGoldStore interface {
+	ListHumanGoldScores(ctx context.Context, runID int64, annotator string) ([]store.HumanGoldScore, error)
+	UpsertHumanGoldScore(ctx context.Context, in store.HumanGoldInput) (store.HumanGoldScore, error)
+	UpdateHumanGoldScore(
+		ctx context.Context, id int64, verdict *string, relevance, helpfulness *int,
+		note *string, reviewed *bool,
+	) (store.HumanGoldScore, error)
+	DeleteHumanGoldScore(ctx context.Context, id int64) error
+}
+
 // QdrantPointStore 按 id 取回 chunk 正文(M4-4.1)。
 //
 // 正文只在向量库里有一份, 不落库(process.md D17), 所以报告抽屉要展示上下文时

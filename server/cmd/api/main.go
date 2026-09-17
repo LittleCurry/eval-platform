@@ -38,6 +38,8 @@ func main() {
 		// 同一个 Qdrant 客户端兼作"按 id 取 chunk 正文"(M4-4.1): 报告抽屉要用上下文原文
 		QdrantPoints: qd,
 		Profiles:     pg,
+		Annotations:  pg,
+		HumanGold:    pg,
 		// 配置模板预览要能算出与提交一致的指纹, 因此与 run 共用同一批默认值(M5-2)
 		EvalEmbedding: eval.EmbeddingConfig{
 			Provider:  cfg.EmbeddingProvider,

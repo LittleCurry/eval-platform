@@ -18,6 +18,7 @@ const menuOptions: MenuOption[] = [
   { label: '语料库', key: 'corpora' },
   { label: '数据集', key: 'datasets' },
   { label: '运行报告', key: 'runs' },
+  { label: '标注工作台', key: 'annotations' },
   { label: '配置模板', key: 'profiles' },
   { label: 'A/B 对比', key: 'compare' },
 ]

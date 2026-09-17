@@ -468,6 +468,14 @@ const caseColumns: DataTableColumns<RunCaseResult> = [
               style="width: 260px"
               @update:value="openCompare"
           />
+          <NButton
+              v-if="flagEntries.length"
+              size="small"
+              quaternary
+              @click="router.push({ path: '/annotations', query: { run: String(runId) } })"
+          >
+            去标注这 {{ flagEntries.reduce((sum, [, count]) => sum + count, 0) }} 条标签
+          </NButton>
           <NTag :type="statusTagType(report?.run.status)">
             {{ statusLabel(report?.run.status) }}
           </NTag>
