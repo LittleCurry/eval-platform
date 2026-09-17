@@ -688,7 +688,7 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
       —— 未完成：其余列表页接入 AsyncState、图表配色统一、标注页快捷键提示的打磨（见 M7-3 小结的"未做"）
 - [x] Docker Compose 一键部署（api+worker+web+pg+qdrant+可选 redis），`.env.example` 完整注释 —— **M7-4 完成**
 - [x] 部署文档：内网机器三步启动、备份（PG dump + Qdrant snapshot）、升级流程 —— **M7-4 完成**（`docs/deploy.md` + `scripts/backup.sh`）
-- [ ] README 成稿：项目动机、架构图、指标口径、**参考调研章节（DeepEval/RAGAS 等对比与借鉴点，注明核心自研）**、demo 脚本
+- [x] README 成稿：项目动机、架构图、指标口径、**参考调研章节（DeepEval/RAGAS 等对比与借鉴点，注明核心自研）**、demo 脚本 —— **M7-5 完成**
 - [ ] 全量测试回归 + 演示录制脚本（一步步讲：上传→评测→报告→对比→标注）
 - [ ] 找同事试用一轮，收集 3–5 个真实反馈并修掉高优项
 
@@ -765,6 +765,21 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 2. **镜像里不该信任宿主机的文件权限**：仓库里有个文件是 `0600`（其他都是 0644，应该是某次受限 umask 创建的），`COPY` 原样保留，于是非 root 的 worker 用户连"读自己代码"都被拒（`PermissionError: /app/app/generation/__init__.py`）。镜像里统一 `chown -R worker:worker /app && chmod -R a+rX /app` 兜底。
 
 **未做/转出**：HTTPS/域名与反向代理（`docs/deploy.md` 里给了指引，没做成 compose 里的服务）；镜像发布到私仓（现在是本地 build）；多副本 worker 的编排示例。
+
+**M7-5 完成小结（2026-09-17）：README 成稿**
+
+**结构**（322 行，按"面试能讲 20 分钟"组织）：项目动机（四个真实痛点）→ 架构图 + 两条关键数据流 → 快速开始（部署 / 本地开发两条路）→ 六块核心能力 → 指标口径表（含每条"为什么这么定"）→ **参考调研**（DeepEval / RAGAS 对比与借鉴）→ 复现性四件套 → 20 分钟 demo → 工程实践（测试分层 + 故障演练 + 真实踩坑）→ 已知限制与 Roadmap → 目录结构。
+
+**关键取舍**：README 里的数字**全部来自真实 run**（#112 0.6736 / #156 0.9097 / #100 0.9486、+27.5pp、`p=2e-06`、修好 19 题变坏 0 题、#155 判定 60 题幻觉率 0.0%、judge 101k tokens、语料 80 chunk、15 张表 / 9 个迁移、测试 293+230+Go 5 包），不写"理论上支持"。demo 章节给的是**可复制的路径与预期现象**，M7-6 再把它变成录制脚本。
+
+**参考调研章节怎么写的**（清单里点名要求，也最容易被追问）：
+- **先核实再写**：直接读了两边官方文档的指标清单（[RAGAS available metrics](https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/)、[DeepEval metrics introduction](https://deepeval.com/docs/metrics-introduction)）—— RAGAS 的 RAG 指标是 Context Precision/Recall、Context Entities Recall、Noise Sensitivity、Response Relevancy、Faithfulness 等；DeepEval 自称 50+ 指标（G-Eval/DAG/QAG，含 agent 轨迹、多轮、安全与红队）。**不凭印象写**，每条都能对回文档。
+- **对比表按"能力维度"而不是"功能清单"**：定位 / RAG 指标 / 判定方式 / 根因定位 / 实验管理 / A/B 统计 / 可靠性 / judge 可信度 / 迭代闭环 / 成本核算 / 测试集生成 / Agent 与安全。
+- **明确"借鉴了什么"**（4 条，具体到机制）：faithfulness 的分解思路、"分数+理由+阈值"的输出形态、context precision/recall 的问题意识（换实现路线）、CI 集成的退出码形态。
+- **明确"为什么自研"**（4 条）：可复现性框架层不管 / 根因是自研重点 / 可靠性需求不同（异步 + checkpoint 续跑）/ 口径要能自己解释（Go 与 Python 双实现 + 真库测试对齐）。
+- **也写"不做什么"**：红队与安全指标、合成测试集、多轮与 Agent 轨迹 —— 并说明各自为什么不在当前范围。
+
+**顺带修掉一个口径 bug（写 README 时核数字发现的）**：`_aggregate_run_metrics` 无论有没有判定都写三率，于是一个**纯检索**的 run 在 `runs.metrics` 里带着 `hallucination_rate=0.0` —— 报告页有 `hasLlmMetrics` 兜着不会误显示，但直接查库的人会读成"这次零幻觉"。已改成"判过（或调用过判定）才写用量键、分母为 0 时不写率值"，并清理了历史 run #156 的零值键（见 commit `e179c60`）。这正是"写文档时回头核对数字"的价值。
 
 ---
 
