@@ -45,6 +45,21 @@ api-restart: ## 重启本地 API(按端口杀旧实例 + 后台起 + 等 healthz
 	pids=$$(lsof -nP -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
 	if [ -n "$$pids" ]; then \
 	  echo "端口 $$port 上的监听进程:"; ps -o pid=,command= -p $$pids | cut -c1-100; \
+	  foreign=""; \
+	  for pid in $$pids; do \
+	    cmd=$$(ps -o command= -p $$pid 2>/dev/null || true); \
+	    case "$$cmd" in \
+	      *"go run ./cmd/api"*|*"/cmd/api"*|*"exe/api"*|*"go-build"*"/api"*) ;; \
+	      *) foreign="$$foreign $$pid";; \
+	    esac; \
+	  done; \
+	  if [ -n "$$foreign" ]; then \
+	    echo "❌ 端口 $$port 被**不是本仓库 API** 的进程占用:$$foreign"; \
+	    echo "   最常见的是 docker compose 的 web 容器(WEB_PORT=8080 → nginx), 看: docker compose ps"; \
+	    echo "   请先 docker compose down(或改用 make api-restart API_PORT=8081 + WEB 指向它),"; \
+	    echo "   别让这个目标去杀 Docker 的端口转发进程。"; \
+	    exit 1; \
+	  fi; \
 	  kill $$pids 2>/dev/null || true; \
 	  for _ in 1 2 3 4 5; do sleep 1; lsof -nP -ti tcp:$$port -sTCP:LISTEN >/dev/null 2>&1 || break; done; \
 	  pids=$$(lsof -nP -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
