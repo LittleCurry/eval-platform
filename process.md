@@ -49,7 +49,7 @@
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  Web (Vue3 + TS + Naive UI/Element Plus + ECharts)                  │
+│  Web (Vue3 + TS + Naive UI; 无图表库, 自绘进度/标签/色带)          │
 │  数据/语料管理 · 评测任务 · 报告 · 对比实验 · Bad Case 标注 · 登录     │
 └───────────────────────────────┬────────────────────────────────────┘
                                 │ HTTP + WS(进度推送)   [JWT]
@@ -82,7 +82,7 @@ Redis 定位：**可选**（judge 缓存读多写少的旁路、并发限流计�
 | 向量库 | Qdrant | 简历认可度最高的开源向量库，docker 一键起，payload 过滤强 |
 | 队列 | PG `FOR UPDATE SKIP LOCKED`（不用 Redis 队列） | 见 §4 D2 —— 可靠性是简历卖点 |
 | LLM 客户端 | OpenAI 兼容 SDK | 供应商可切换 |
-| 前端 | Vue3 + TS + Vite + Naive UI + ECharts | 中文生态文档好、上手快、好看省力 |
+| 前端 | Vue3 + TS + Vite + Naive UI | 中文生态文档好、上手快、好看省力；**没引图表库**（图表=进度条+标签+自绘色带，见 D9 更正与 D25 以外的 M7-3 小结） |
 | 部署 | Docker Compose（单机/内网） | M0 就起；同事共用 = 内网一键部署 |
 | 迁移 | golang-migrate（PG schema） | 版本化、可回滚 |
 
@@ -217,7 +217,8 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 
 - **JWT 登录 + RBAC 三角色**：`admin`（全量管理）/ `editor`（建语料、数据集、跑 run、标注）/ `viewer`（只看报告）。
 - **项目（project）数据隔离**：语料/数据集/run/标注都属于某 project；默认创建者可见，admin 可加成员。避免同事互相覆盖实验。
-- 界面设计基线（M7 统一）：一致的间距/字号/色彩体系、空状态、加载态、错误提示（toast）、表格分页与列配置、深浅主题可选；ECharts 报告配色与品牌色一致。
+- 界面设计基线（M7 统一）：一致的间距/字号/色彩体系、空状态、加载态、错误提示（toast）、表格分页与列配置、深浅主题可选；图表配色与品牌色一致。
+  - **更正（M7-3 落地时发现）**：这句原本写的是"ECharts 报告配色与品牌色一致"—— 但项目里**并没有引入 ECharts**（图表就是 `NProgress` 进度条 + `NTag` 标签 + 自绘色带），所以"配色统一"实际落在**语义色板**上：`web/src/utils/palette.ts` 是唯一出处（与 naive-ui light 主题对齐），并有"src 下不许出现色值字面量"的源码扫描测试兜着。把愿望写成现状，是这轮更正它的原因。
 
 ### D10 指标口径（先定死公式，避免各算各的）
 
@@ -402,6 +403,18 @@ chunk id 在切分参数变化后失效 → chunk size 就没法作为实验变�
 - **为什么归属要显示邮箱**：全员可见意味着"谁能看"不再是控制手段，那么**责任**就成了唯一的约束 —— 项目列表里能直接看到创建者，比一个裸露的 `created_by=3` 有用得多。M7 之前建的项目 `created_by` 为 NULL，前端显示「创建者未知（M7 之前建立的项目）」，不留空白。
 - **前端的项目上下文**：`currentProjectId` 从"写死 1"变成"真实项目列表 + 用户上次的选择（localStorage）"；记住的项目被删时**回退到第一个并明确提示**（静默换项目会让人以为在看 A、其实在看 B）；切换项目后各页面 `watch` 重新加载，否则界面还停在旧项目的数据上。
 - **新部署的空项目引导**：库里一个项目都没有时，顶栏显示「建第一个项目」（仅管理员），各列表页显示引导文案 —— 否则装完系统连语料库都建不了（`project_id` 必填）。
+
+### D25 语料索引"按需自动构建"，而不是只能跑 CLI
+
+**背景（M7-6 回归时发现的真问题）**：建索引以前只有 `python -m app.cli.index_corpus --corpus-id N` 一个入口。于是同事在界面上传完文档、点「提交评测」，worker 只会回一句 `索引不存在: corpus110_xxxx, 请先构建索引(index_corpus)` —— 他没有 shell，全流程断在这里。而 M7 的验收标准恰恰是"同事独立完成 建项目→导入数据→跑评测→看报告→标 case"。
+
+**决定**：**run 的 worker 发现集合不存在时，按本次 run 的切分配置自动补建一次索引**，建好即继续；集合已存在则完全不进这条分支。
+
+- **为什么安全**：collection 名由 `(corpus_id, chunking_hash)` 推导（`indexer.collection_name`），而这里的切分配置来自**本次 run 的配置快照** —— 补建出来的必然就是这次 run 要的那个集合，不会串到别人的配置上，也不会改变"同配置复用同一个集合"的性质（D17）。
+- **为什么不做一个"构建索引"按钮/job**：`jobs.run_id` 是 NOT NULL 且指向 `runs`，索引任务没有 run 可挂 —— 要做就得先改表结构（允许 NULL 或单开一张表），那是另一件事。而"上传文档 → 提交评测"这条主流程不该等它。
+- **代价**：第一次提交会多花一次全量 embedding 的时间（日志里 `index_build_start` / `index_build_done` 两行写清楚 docs/chunks/embed_tokens/elapsed_ms），期间用户看到的是任务在"运行中"。可接受：这份 embedding 本来就必须付。
+- **保留了 CLI**：`make` 里没有这个目标，用 `worker/.venv/bin/python -m app.cli.index_corpus --corpus-id N [--recreate]` 预建/重建 —— 批量灌数据时先把索引建好，比"提交了才建"更省心。
+- **测试钉住**：`test_missing_index_is_built_automatically`（用快照里的配置建，不是 worker 环境变量）、`test_existing_index_is_not_rebuilt`（已存在时**不许**调 `index_corpus`，否则白烧 embedding）、`test_index_build_failure_fails_job_with_actionable_message`（建失败要给出"缺什么 + 为什么没建成"）。
 
 ---
 
@@ -682,15 +695,16 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 **任务清单**
 - [x] 登录/注册 + JWT + RBAC（admin/editor/viewer，权限落到 API 与前端路由）—— M7-1 完成，见下方小结
 - [x] project 隔离完善：成员管理、资源归属、跨 project 只读隔离校验 —— **M7-2 完成**（决策见 §4 D24：不建成员表，`created_by` + 全员可见）
-- [~] UI 打磨：设计基线统一（空/载/错状态、表格、图表配色）、报告导出按钮、标注页体验
-      —— 已完成：①顶栏导航截断修复(导航独占一行, 实测 900px 以上 11 项全完整) ②只读账号写按钮置灰(含全局只读横幅)
-      ③统一三态组件 AsyncState(语料库/数据集已接入) ④报告导出(CSV/Markdown)
-      —— 未完成：其余列表页接入 AsyncState、图表配色统一、标注页快捷键提示的打磨（见 M7-3 小结的"未做"）
+- [x] UI 打磨：设计基线统一（空/载/错状态、表格、图表配色）、报告导出按钮、标注页体验 —— **M7-3 完成**：
+      ①顶栏导航截断修复(导航独占一行, 实测 900px 以上 11 项全完整) ②只读账号写按钮置灰(含全局只读横幅)
+      ③统一三态组件 AsyncState(11 个数据页全部接入) ④报告导出(CSV/Markdown)
+      ⑤语义色板唯一出处 + "色值不外泄"源码扫描测试 ⑥标注/金标页快捷键提示打磨(含一个真 bug 修复)
+      ⑦报告页列宽收口(scroll-x 由列宽推导 + 数字列右对齐 + 表头口径提示)
 - [x] Docker Compose 一键部署（api+worker+web+pg+qdrant+可选 redis），`.env.example` 完整注释 —— **M7-4 完成**
 - [x] 部署文档：内网机器三步启动、备份（PG dump + Qdrant snapshot）、升级流程 —— **M7-4 完成**（`docs/deploy.md` + `scripts/backup.sh`）
 - [x] README 成稿：项目动机、架构图、指标口径、**参考调研章节（DeepEval/RAGAS 等对比与借鉴点，注明核心自研）**、demo 脚本 —— **M7-5 完成**
-- [ ] 全量测试回归 + 演示录制脚本（一步步讲：上传→评测→报告→对比→标注）
-- [ ] 找同事试用一轮，收集 3–5 个真实反馈并修掉高优项
+- [x] 全量测试回归 + 演示录制脚本（一步步讲：上传→评测→报告→对比→标注）—— **M7-6 完成**（`scripts/demo.sh` + `make regress`）
+- [~] 找同事试用一轮，收集 3–5 个真实反馈并修掉高优项 —— **M7-7**：试用工具包已就绪（`docs/trial.md`：20 分钟路径 + 反馈表 + 优先级规则），**试用本身需要人**, 待排期
 
 **验收标准**：同事在部署环境注册登录，能独立完成"建项目→导入数据→跑评测→看报告→标 Bad Case"全流程；README 能支撑你面试讲 20 分钟。
 
@@ -736,7 +750,7 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 - 项目改名/删除、成员/归属转移：M7-2 只做"归属留痕 + 隔离校验"；资源都挂在项目下，删除项目是危险动作，留到有真实需求时再设计（需要先决定级联还是迁移）。
 - 「谁的 run 谁改」这类**按人的**约束：与 D24 的"全员可见"取向冲突，不做。
 
-**M7-3 完成小结（2026-09-17，部分）：UI 打磨与只读体验**
+**M7-3 完成小结（2026-09-17）：UI 打磨与只读体验**
 
 **做完了**（每条都有实测）：
 - **顶栏导航截断**（用户报的 bug）：根因不是"标签太多"，而是"标题 + 11 个页面 + 项目切换 + 角色 + 账号"约 1550px 挤在 64px 一行里。改成**导航独占第二行** + 收紧菜单项内边距 + 角色挪进账号下拉。无头 Chrome 实测：11 项自然宽 808px，**≥900px 全部标签完整无截断**；760/520px 下不截断而是横向可滚（naive-ui 会压缩菜单项把文字截成"…"，必须 `flex-shrink: 0` + 让菜单自己 `overflow-x: auto` —— 容器上设不生效，因为 `.n-menu` 自带 `overflow: hidden`）。
@@ -745,7 +759,14 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 - **报告导出**：`buildReportCsv`（概况/指标/归因标签/逐题明细四段）+ `buildReportMarkdown`（只放结论级内容），复用对比页的 CSV 转义约定；报告页头部下拉导出；10 条测试（含"没判定显示 — 而不是 0/0/0"这类口径）。
 - **菜单防回归**：菜单抽成 `utils/navigation.ts` 纯数据，配 11 条测试做**双向对照**（该进菜单的路由一个都不能漏 / 菜单 key 必须有对应路由 / 按角色过滤 / 项数与标签宽度预警线）。
 
-**未做（转出到下一批）**：其余列表页接入 AsyncState、图表配色统一、标注页快捷键提示打磨、报告页表格列宽再收一遍。
+**补齐（M7-3 收口，2026-09-17 晚）**：上面那四项"未做"全部做完，且各配了测试：
+
+- **三态覆盖到全部 11 个数据页**（此前只有语料库/数据集）：运行列表、数据集列表/详情、配置模板、用户、金标、校准、闭环、对比、报告、标注工作台。约定统一为"加载中不算空（否则先闪一下'暂无数据'）+ 已有数据时保留原来的行内红条（两者互斥，不会两条红条）+ 空态文案写清下一步"；对象型主数据（报告/校准/闭环/对比）用 `report === null` 等价判断并在注释里写明依据；首屏失败的重试走各页真实加载顺序（run 列表没拉到就先重拉列表，否则点重试像没反应）。
+- **配色统一**：新增 `utils/palette.ts` 作为语义 → 颜色的唯一出处（与 naive-ui light 主题的 success/warning/error/info 对齐，所以"标签的绿"和"边框的绿"是同一个绿），配 `tint()/softTint()/cssVars()`；`main.ts` 把变量挂到 `<html>`，SFC 里写 `var(--ev-error)`。**并加了一条源码扫描测试**：除 palette.ts 外 src 下不许出现十六进制/rgb 字面量 —— 光有一个色板文件没人拦着，下一个页面照样会抄一个 `#d03050` 进去。落地时清掉了 4 处既有硬编码（报告页断言计数与 claim 色带、金标页答案块与选中行、校准页热力格）。顺带更正本文件 §4 D9 里"ECharts 报告配色"那句话：**项目里并没有引入 ECharts**，图表就是 `NProgress` 进度条 + 标签 + 自绘色带，所以"配色统一"落成了这张语义色板。
+- **快捷键提示打磨**（`utils/shortcuts.ts` + `components/ShortcutHelpModal.vue`，两个标注页共用），并**修掉一个真 bug**：以前按住 Cmd/Ctrl 再按数字会被当成"打归因/判词"（浏览器自己的快捷键会把标注改掉）。现在"该不该接管这次按键"只有一份实现（输入框/可编辑区不抢、带 Ctrl·Cmd·Alt 不抢、`normalizeKey` 让 Shift+N 与 n 同义）。快捷键表也成了唯一出处：按钮文案、帮助弹窗、生效绑定都从表派生（以前三处各写一份，改了绑定忘改按钮就会误导人）。另加 `?` 开关帮助弹窗、底部一行提示改为"有哪些键，细节点 ?"、评论/备注支持 Ctrl/Cmd+Enter 保存、标注页补 p/b 上一题、只读账号按快捷键给一次性提示（而不是静默无效）。
+- **报告页列宽收口**：列定义挪到 `utils/reportTable.ts`（23 条测试），`scroll-x` 由列宽**推导**（以前是手写常数 1086/776，加一列忘改就把列挤窄）、每列带下限宽度守卫、数字列（Recall/MRR）右对齐、紧凑表头（断言 1/0/0、rubric R5 H4、主因）配悬浮口径说明（naive-ui 2.45 的 DataTable 没有 `renderHeader`，所以用 `title` 传函数渲染 tooltip）。
+
+**实测**（无头 Chrome 量真实 DOM，不是看代码推的）：报告页 `var(--ev-*)` 在运行时确实挂在 `<html>` 上；抽屉里的 `.claim-supported` 计算样式 `border-left = rgb(24,160,88)`（= #18a058）、底色 `rgba(24,160,88,0.1)`、`.answer-block` 底色 `rgba(138,138,138,0.08)`（= 中性浅底）；最差用例表列宽实测 `96/64/82/110/132/92`（与规格一致）；11 个页面逐个渲染，骨架屏 0、错误红条 0、表格都有数据行。
 
 **M7-4 完成小结（2026-09-17）：全栈一键部署**
 
@@ -781,6 +802,30 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 
 **顺带修掉一个口径 bug（写 README 时核数字发现的）**：`_aggregate_run_metrics` 无论有没有判定都写三率，于是一个**纯检索**的 run 在 `runs.metrics` 里带着 `hallucination_rate=0.0` —— 报告页有 `hasLlmMetrics` 兜着不会误显示，但直接查库的人会读成"这次零幻觉"。已改成"判过（或调用过判定）才写用量键、分母为 0 时不写率值"，并清理了历史 run #156 的零值键（见 commit `e179c60`）。这正是"写文档时回头核对数字"的价值。
 
+**M7-6 完成小结（2026-09-17）：全量回归 + 演示脚本**
+
+**交付物**：`scripts/demo.sh`（两种模式）、`make demo`、`make regress`。
+
+- **演示路径（默认，不花 token）**：8 步走完"环境自检 → 登录 → 数据概览 → A/B 对比 → 报告 → 标注闭环 → judge 校准 → 可靠性演练"。每一步**先打"预期现象"再打真实返回值**，并当场对比 —— 录屏的人不用背台词，看的人也不必"相信我讲的"。
+- **`--full`（真跑一遍）**：建项目 → 建语料库 → 上传 4 篇文档 → 建数据集（JSONL 导入 4 题带 `gold_anchors`）→ 提交 top_k=1 纯检索评测 → 等 worker → 标注检索类 bad case → 改 top_k=3 重跑 → 对比 → 闭环。**不烧生成/判定 token**（只花 embedding）。演示数据是设计过的：Q4 是跨文档问题（gold 落在两篇文档里），所以 k=1 必然答不全、k=3 才捞齐 —— 对比里那条"修好 1 题 / 变坏 0 题"是配置决定的**必然结果**，不是碰巧。
+- **`make regress`**：交付前体检（不花 token）= gofmt + `go vet` + Go 单测 + `ruff` + `pytest` + 前端 vitest + `pnpm build`（含 `vue-tsc`）+ 迁移文件成对性。为什么单开一个目标而不是塞进 `make test`：`test` 是"快速单测"，这条是"能不能交"。
+
+**实测（这一轮真的跑出来的）**：`make regress` 全绿 —— Go 5 个包 ok、worker **295 passed / 20 skipped**、web **285 passed**、`vue-tsc` 与 `vite build` 通过、9 个迁移 up/down 成对；live 层：Go 真库 **13 PASS / 0 SKIP**（队列为空时）、worker live **2 passed**（需账号，见下）；`scripts/demo.sh --full` 从零跑通，run #280 recall 0.875 → #281 recall 1.0，闭环显示 `Q4: fixed → improved（recall 0.5→1）`。
+
+**这轮回归暴露的三个真问题（都修了，都补了测试）**
+
+1. **建索引只有 CLI 入口 → 同事在界面上根本跑不动评测**（演示脚本走到"提交评测"才暴露，见 D25）。现在 worker 发现集合不存在时按**本次 run 的切分配置**自动补建，日志里 `index_build_start` / `index_build_done` 写清 docs/chunks/embed_tokens/耗时；集合已存在则完全不进这条分支（有测试守着"不许重建"）。这正是"把 demo 变成可执行脚本"的价值 —— 光靠人点，这一步会被"我自己机器上有索引"掩盖过去。
+2. **队列会"少跑几条还报成功"**：任务收尾只看 `failed` 计数，没看还有没有 `pending/running`。实测撞到：一个 30 题的 job 只跑了 20 条却报 `succeeded`，run 的 `cases_evaluated=20`，而报告页那句"有 N 题没有结果"只统计 `failed`（`running` 不算），于是**静默少算了一批题**。成因是上一轮 worker 被强杀后条目停在 `running`，而领取只认 `pending`（接管逻辑要等心跳超时，手工把 job 放回队列 / `--job-id` 重跑都不经过它）。修法两条：①续跑开始先 `release_running_items` 归位（并打日志）；②收尾时若仍有未终结条目，**以 failed 收尾**并把数字写进错误（"还有 2 条用例未执行(待跑 1 · 运行中 1)"）—— 宁可显示失败，也不能成功姿态少算。新增 `test_resume_releases_items_left_in_running`（归位必须发生在领取之前）与 `test_job_with_unfinished_items_is_failed_not_succeeded`。
+3. **M7-1 的鉴权把两条 worker live 测试打成了 401**（`test_worker_processes_submitted_job_end_to_end` / `test_worker_resume_after_partial_run_without_recompute` 直接 `POST /api/v1/runs`）。它们只在 `RUN_LIVE=1` 时跑，所以 M7-1 之后一直没人发现 —— 这正是"全量回归"该抓的东西。现在它们会先登录（`LIVE_API_EMAIL`/`LIVE_API_PASSWORD`，回落到 `.env` 的 `DEMO_EMAIL`/`DEMO_PASSWORD`），无凭据则**跳过并说清怎么办**（而不是抛 401 让人猜），账号权限不够（403）也跳过并提示"要用 editor/admin"。带账号实跑：**2 passed**。
+
+**另外两条操作经验**：worker 的 live 测试很慢（30 题 × 两轮 ≈ 8–10 分钟，pytest 默认输出被缓冲，看着像卡死）—— 跑它请留足时间，别中途 kill（kill 掉就会留下"条目停在 running"的第 2 条问题）；`scripts/demo.sh` 会真的往库里写项目/语料/数据集/run，**演示后要自己清理**（脚本结尾会明确提示，不自动删）。
+
+**M7-7 状态（2026-09-17）：工具包就绪，试用待排期**
+
+`docs/trial.md` 已经写成"可以直接发给同事"的形态：30 秒开场白、20 分钟他自己走的 8 步路径 + **每一步该观察什么**（观察项是给负责人记的，不是提示他的）、反馈表（类型限定为找不到/看不懂/不信/多余/慢/bug 六类，每类对应我改哪里）、以及高/中/低优先级规则（只修高优：挡住主流程或让人误解结论）。
+
+**为什么这条没有"完成"**：真实反馈只能来自真实的人，我不能替同事点鼠标 —— 编造 3–5 条"同事反馈"比不做更糟。这一项等你约到人，按 `docs/trial.md` 走一轮，把结果补进本节即可。
+
 ---
 
 ---
@@ -796,7 +841,8 @@ eval-platform/
 ├── .env.example
 ├── README.md
 ├── process.md              # 本文档，随进展更新
-├── docs/                   # ADR 决策记录、故障演练、部署文档
+├── docs/                   # ADR 决策记录、故障演练、部署文档、同事试用指引(trial.md)
+├── scripts/                # 运维与演示脚本: 备份 / 故障演练 / **demo.sh(20 分钟演示)**
 ├── datasets/               # 评测集资产（语料原始件 + jsonl + 标注脚本）
 ├── server/                 # Go API
 │   ├── cmd/api/main.go
@@ -814,9 +860,11 @@ eval-platform/
 │       ├── adapters/       # builtin / http(外部被测服务)
 │       ├── metrics/        # 指标计算与聚合
 │       └── db/ queue/      # job 领取、checkpoint、心跳（worker 侧）
-└── web/                    # Vue3 + TS
+└── web/                    # Vue3 + TS(无图表库: 进度条 + 标签 + 自绘色带)
     ├── src/views/          # login/datasets/corpora/runs/reports/compare/annotate/admin
-    └── src/api/ components/ store/
+    ├── src/components/     # AsyncState(三态) / ShortcutHelpModal(快捷键帮助)
+    ├── src/utils/          # 纯逻辑 + 单测: palette(语义色) / shortcuts / reportTable / navigation ...
+    └── src/api/ store/
 ```
 
 ### 工作流规则（AGENTS.md 约定 + 本项目补充）
@@ -824,7 +872,7 @@ eval-platform/
 - 每个任务卡 = 一次改动；**先写/改测试 → 全绿 → 一个 commit**。
 - commit message 规范：`<type>: <subject>`，type ∈ feat/fix/refactor/test/docs/chore；必要时正文说明动机。
 - 里程碑完成 = 该节任务全勾 + 验收 demo 可跑 + 更新 process.md（勾选/记录偏差/新增 ADR）+ 一个 docs commit + 一个 tag（`v0.x.0-m<里程碑>`）。
-- tag 现状：`v0.1.0-m0` / `v0.2.0-m2` / `v0.3.0-m3` 已有；**M4 与 M5 的收尾落在同一个 commit（`6b8aedc` A/B对照，M4-4.1 与 M5-1/M5-2 一起进来），因此 `v0.4.0-m4` 与 `v0.5.0-m5` 指向同一个 commit**；M6 的 tag 待 M6 收口 commit 打上。
+- tag 现状：`v0.1.0-m0` / `v0.2.0-m2` / `v0.3.0-m3` / `v0.6.0-m6` 已有；**M4 与 M5 的收尾落在同一个 commit（`6b8aedc` A/B对照，M4-4.1 与 M5-1/M5-2 一起进来），因此 `v0.4.0-m4` 与 `v0.5.0-m5` 指向同一个 commit**；M7 的 tag 打在 M7 收口 commit 上（M7-7 试用是唯一未完成项，tag 记的是"代码与文档收口"这个点）。
 - 依赖注入与配置不写死；所有 secret 走 `.env`。
 
 ---

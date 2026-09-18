@@ -103,6 +103,9 @@ make web-install && make web # 前端 → :5173
 
 前置：Docker Desktop、Go 1.24+、Python 3.11+（开发机 3.14）、Node 20+ 与 pnpm。
 
+> **第一次跑评测会发生什么**：上传文档后直接点「提交评测」即可 —— worker 发现该语料在这个切分配置下还没有索引，会**按本次 run 的快照配置自动建一次索引**（日志里 `index_build_start` / `index_build_done` 写清 docs/chunks/embed_tokens/耗时），之后同配置的 run 直接复用，不会重复 embedding。想提前批量建索引（灌大数据集时更省心）可以手动跑：
+> `cd worker && .venv/bin/python -m app.cli.index_corpus --corpus-id <id> [--recreate]`（见 process.md D25）。
+
 ---
 
 ## 核心能力
@@ -240,7 +243,14 @@ no_gold > anchor_incomplete > retrieval_miss > retrieval_partial > retrieval_low
 
 ## 20 分钟 demo
 
-按这个顺序走，刚好覆盖"发现 → 定位 → 修 → 复测 → 销单"：
+有个可执行的版本：**`scripts/demo.sh`**（或 `make demo`）。它会**每一步先打"预期现象"再打真实返回值**并当场对比，所以录屏不用背台词；默认走下面第 1–5 步（不花 token），加 `--full` 会真的从零建项目/传文档/跑两次纯检索评测（只花 embedding，不烧生成与判定 token）。
+
+```bash
+DEMO_EMAIL=you@example.com DEMO_PASSWORD=*** scripts/demo.sh          # 演示路径
+DEMO_EMAIL=you@example.com DEMO_PASSWORD=*** scripts/demo.sh --full   # 从零跑一遍
+```
+
+手动走的话按下面这个顺序，刚好覆盖"发现 → 定位 → 修 → 复测 → 销单"：
 
 ```bash
 # 0) 起服务（见"快速开始"）
@@ -274,18 +284,19 @@ make drill-compare REF=100   # 退出码 0 = 逐题与参照 run 一致
 
 ## 工程实践
 
-**测试**：`292 passed / 20 skipped`（worker）+ Go 5 个包 + 前端 `230 passed`。分层策略：
+**测试**：`295 passed / 20 skipped`（worker）+ Go 5 个包 + 前端 `285 passed`；live 层（`RUN_LIVE=1`）Go 真库 13 条、worker 2 条。一条命令跑完（不花 token）：`make regress`。分层策略：
 
 | 层 | 手段 | 例子 |
 |----|------|------|
 | 纯函数单测 | 手算样例 + 边界 | κ 教科书样例 = 0.6；混淆矩阵逐格；`evidenceHighlights` 优先级 |
 | 接口层 | httptest + 内存 stub | 权限三态（401/403）、状态机非法流转 409、跨项目 400 |
 | **真库集成**（`RUN_LIVE=1`） | 真 PostgreSQL / Qdrant | 并发 `SKIP LOCKED` 不重复领取、checkpoint 事务、僵尸接管、跨项目不变量 |
-| 端到端 | 无头 Chrome 量 DOM | 顶栏在 9 种宽度下是否截断；只读账号禁用按钮数（viewer 11 禁 7 / admin 0） |
+| 端到端 | 无头 Chrome 量 DOM | 顶栏在 9 种宽度下是否截断；只读账号禁用按钮数（viewer 11 禁 7 / admin 0）；报告页 `var(--ev-*)` 是否真的生效（断言 `border-left` 计算值 = `rgb(24,160,88)`） |
+| 演示即验收 | `scripts/demo.sh` | 从零建项目→传文档→跑评测→标注→对比→闭环，每一步打印预期 vs 实际 |
 
 **故障演练**：60 题跑到一半 `kill -9` worker → 重启续跑，崩溃时已完成 4 条、续跑只处理 56 条，最终逐题结果与不中断跑一致（`make drill-compare`）。
 
-**真实踩坑（都改成了测试）**：整行覆盖把分数/备注冲成 NULL（改成合并语义 + 守卫测试）、`SELECT` 加列忘改 `Scan`（列数不匹配只有真库测试能发现）、队列 live 测试误伤真实任务（加"独占队列"守卫）、worker 容器里 `PG_DSN` 变量名不对导致静默回落 localhost、镜像里宿主机 `0600` 文件权限导致非 root 读不了代码。
+**真实踩坑（都改成了测试）**：整行覆盖把分数/备注冲成 NULL（改成合并语义 + 守卫测试）、`SELECT` 加列忘改 `Scan`（列数不匹配只有真库测试能发现）、队列 live 测试误伤真实任务（加"独占队列"守卫）、worker 容器里 `PG_DSN` 变量名不对导致静默回落 localhost、镜像里宿主机 `0600` 文件权限导致非 root 读不了代码、**队列"少跑几条还报成功"**（30 题的 job 只跑了 20 条却是 `succeeded` —— 被强杀后条目停在 running 而领取只认 pending；现在续跑先归位、收尾还有未终结条目就以 failed 收尾并写清数字）、**建索引只有 CLI 入口**（同事在界面上传完文档就没有下一步，现在按 run 的快照配置自动建，见 D25）。
 
 ---
 
@@ -297,11 +308,13 @@ make drill-compare REF=100   # 退出码 0 = 逐题与参照 run 一致
 - judge 仍是 LLM：协议与校准能暴露偏差，但不能保证"永远正确"——所以有了人工金标校准这一环，结论以 κ 与判错清单说话。
 - 团队规模假设是"十来人、项目数个"：项目**全员可见**（D24），没有按人授权的成员表。
 - 部署是单实例；多副本 worker 需要自己编排（数据侧已支持：`SKIP LOCKED` + 每 job 单持有）。
+- **索引构建没有独立的界面入口**：提交评测时按需自动建（D25），想"先建好再跑"只能用 CLI（`index_corpus`）。做成"构建索引"按钮需要一个不属于任何 run 的任务类型，而 `jobs.run_id` 现在是 NOT NULL —— 要先动表结构，暂不做。
+- 前端的图表是**进度条 + 标签 + 自绘色带**，没有引入图表库：当前要表达的是"比例/阈值/好坏"，不是趋势与分布；真要看分布曲线时再引（那时才需要一套完整配色与交互规范）。
 
 **Roadmap**
 
-- [ ] M7-6：全量回归 + demo 录制脚本
-- [ ] M7-7：同事试用并修高优反馈
+- [x] M7-6：全量回归（`make regress`）+ 演示脚本（`scripts/demo.sh`）
+- [~] M7-7：同事试用并修高优反馈 —— 试用工具包已就绪（[docs/trial.md](docs/trial.md)：20 分钟路径 + 反馈表 + 优先级规则），等排期
 - [ ] 多轮 / Agent 轨迹指标（需要先定义轨迹数据模型）
 - [ ] 检索侧接入 rerank 的对比维度（当前 `reranker.enabled` 已在快照里预留）
 - [ ] 「要点覆盖」检测：用 `cases.reference_answer` 判"漏答要点"（等人工金标显示 judge 系统性漏判时再做）
