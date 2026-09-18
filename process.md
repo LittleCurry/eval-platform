@@ -820,6 +820,10 @@ M2 起步 30–100 题 → M6 前扩到 ≥200 题 → 固定 **dev 集**（≥5
 
 **另外两条操作经验**：worker 的 live 测试很慢（30 题 × 两轮 ≈ 8–10 分钟，pytest 默认输出被缓冲，看着像卡死）—— 跑它请留足时间，别中途 kill（kill 掉就会留下"条目停在 running"的第 2 条问题）；`scripts/demo.sh` 会真的往库里写项目/语料/数据集/run，**演示后要自己清理**（脚本结尾会明确提示，不自动删）。
 
+**容器路径也验了一遍（同事实际走的那条）**：`docker compose build worker` 重建镜像后确认镜像内的 `queue_runner` 已含三处改动，再让 **compose 里的 worker 容器**（不是本地 venv）跑 `scripts/demo.sh --full`（经 nginx 8080 访问 API）—— 全流程通过，容器日志里能看到 `index_build_start(reason=collection_missing)` → `index_build_done(docs=4, chunks=4, embed_calls=1, elapsed_ms=1216)` → `job_finished(4/4 succeeded)`，第二次提交（改 top_k）**没有**再出现 `index_build_*`（索引被复用），闭环同样是 `Q4: fixed → improved`。
+
+**顺手修掉一个部署期的坑**：`make deploy-up` 之后容器 web 占着宿主 8080，这时跑 `make api-restart` 原本会把监听该端口的进程一律 kill —— 而 `lsof` 看到的是 **Docker 自己的端口转发进程**，等于一刀砍在 Docker 上。现在先核对监听者的命令行，不是本仓库 API 就拒绝并说清怎么办（`docker compose ps` / 先 `down` / 或换 `API_PORT`），实测打印占用者后非 0 退出。
+
 **M7-7 状态（2026-09-17）：工具包就绪，试用待排期**
 
 `docs/trial.md` 已经写成"可以直接发给同事"的形态：30 秒开场白、20 分钟他自己走的 8 步路径 + **每一步该观察什么**（观察项是给负责人记的，不是提示他的）、反馈表（类型限定为找不到/看不懂/不信/多余/慢/bug 六类，每类对应我改哪里）、以及高/中/低优先级规则（只修高优：挡住主流程或让人误解结论）。
