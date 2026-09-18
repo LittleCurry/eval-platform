@@ -1,6 +1,6 @@
 """QueueRunner 离线单测: 用 fake 队列 + fake 检索器验证编排逻辑(不碰 DB/网络)。
 
-覆盖: 正常跑完 / 单条失败与死信 / max_items 暂停并放回队列 / 索引缺失 / 空队列,
+覆盖: 正常跑完 / 单条失败与死信 / max_items 暂停并放回队列 / 索引缺失(自动补建, 已存在不重建) / 空队列,
 M4-1 生成链路(写库带上 answer 与元信息 / 空答案绝不落库 / 致命错误立刻中止任务),
 以及 M4-2 judge 链路(快照驱动 / 判定失败可重试 / rubric 缺失降级 / 缓存复用 / 三率聚合)。
 """
@@ -21,6 +21,7 @@ from app.judge.cache import InMemoryJudgeCache
 from app.llm.client import ChatResult, LLMFatalError, LLMTransientError
 from app.metrics.retrieval import CaseMetric, aggregate
 from app.queue import ClaimedItem, ClaimedJob, RunContext
+from app.retrieval.indexer import IndexReport
 from app.store import CaseRow, DocumentRow
 
 DOC = "# 线索回收\n\n超过 7 天无跟进会自动回收。\n\n## 上限\n\n每人默认 200 条。\n"
@@ -275,19 +276,123 @@ def test_max_items_pauses_and_puts_job_back(patched):
     assert fake_queue.finished == []
 
 
-def test_missing_index_fails_fast(patched):
+def test_missing_index_is_built_automatically(patched, monkeypatch: pytest.MonkeyPatch):
+    """索引缺失时按本次 run 的切分配置自动补建, 然后照常跑完(M7-6 补的入口)。
+
+    以前这里直接失败并让人去跑 CLI —— 同事在界面上传完文档就没有下一步了。
+    """
+    install = patched
+    fake_queue, retriever = install(
+        items=make_items(2), hits=["p1"], gold_ids={"p1"}, collection_exists_flag=False
+    )
+    calls: list[tuple[int, str, int]] = []
+
+    def fake_index(settings: Any, corpus_id: int, cfg: Any) -> Any:
+        calls.append((corpus_id, cfg.strategy, cfg.chunk_size))
+        return IndexReport(
+            collection="corpus4_deadbeef", cfg_hash="deadbeef", docs=1, chunks=2,
+            points=2, embed_calls=1, embed_tokens=42, elapsed_ms=7,
+        )
+
+    monkeypatch.setattr(qr, "index_corpus", fake_index)
+    runner = make_runner(retriever)
+
+    summary = run_job(runner)
+
+    # 用的是快照里的切分配置(headings/500), 而不是 worker 环境里的默认值
+    assert calls == [(4, "headings", 500)]
+    assert summary.status == "succeeded"
+    assert fake_queue.finished == [("succeeded", "")]
+    assert len(fake_queue.completed) == 2
+
+
+def test_existing_index_is_not_rebuilt(patched, monkeypatch: pytest.MonkeyPatch):
+    """集合已存在时不准碰 index_corpus —— 重复索引会白烧一遍 embedding。"""
+    install = patched
+    fake_queue, retriever = install(
+        items=make_items(1), hits=["p1"], gold_ids={"p1"}, collection_exists_flag=True
+    )
+
+    def explode(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 被调用即测试失败
+        raise AssertionError("集合已存在时不该调用 index_corpus")
+
+    monkeypatch.setattr(qr, "index_corpus", explode)
+    runner = make_runner(retriever)
+
+    summary = run_job(runner)
+
+    assert summary.status == "succeeded"
+    assert len(fake_queue.completed) == 1
+
+
+def test_resume_releases_items_left_in_running(patched, monkeypatch: pytest.MonkeyPatch):
+    """续跑开始时先把上一轮遗留在 running 的条目归位 —— 不归位就会"少跑几条还报成功"。
+
+    实测踩到过: 30 题的 run 只跑了 20 条, job 却是 succeeded, run 的 cases_evaluated=20
+    (被强杀的 worker 留下 10 条 running, 而领取只认 pending)。
+    """
+    install = patched
+    fake_queue, retriever = install(items=make_items(2), hits=["p1"], gold_ids={"p1"})
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        qr, "release_running_items",
+        lambda dsn, job_id: (order.append("release"), fake_queue.release_running(dsn, job_id))[1],
+    )
+    monkeypatch.setattr(
+        qr, "claim_job_items",
+        lambda dsn, job_id, limit: (order.append("claim"), fake_queue.claim_items(dsn, job_id, limit))[1],
+    )
+
+    summary = run_job(make_runner(retriever))
+
+    assert summary.status == "succeeded"
+    assert fake_queue.released_running == [7], "续跑前必须归位"
+    assert order.index("release") < order.index("claim"), "归位要发生在领取之前"
+
+
+def test_job_with_unfinished_items_is_failed_not_succeeded(patched, monkeypatch: pytest.MonkeyPatch):
+    """还有条目没跑到终态时不许报成功 —— 报告宁可显示失败, 也不能少算一批题。"""
+    install = patched
+    fake_queue, retriever = install(items=make_items(1), hits=["p1"], gold_ids={"p1"})
+
+    # 领完一条之后队列里"还剩一条 pending"(模拟状态不一致: 上一轮被强杀未归位)
+    monkeypatch.setattr(qr, "job_progress", lambda dsn, job_id: {
+        "pending": 1, "running": 1, "succeeded": 1, "failed": 0, "total": 3,
+    })
+
+    summary = run_job(make_runner(retriever))
+
+    assert summary.status == "failed"
+    status, error = fake_queue.finished[0]
+    assert status == "failed"
+    assert "还有 2 条用例未执行" in error
+    assert "不一致" in error
+
+
+def test_index_build_failure_fails_job_with_actionable_message(
+        patched, monkeypatch: pytest.MonkeyPatch,
+):
     install = patched
     fake_queue, retriever = install(
         items=make_items(1), hits=["p1"], gold_ids={"p1"}, collection_exists_flag=False
     )
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("embedding 服务 401")
+
+    monkeypatch.setattr(qr, "index_corpus", broken)
     runner = make_runner(retriever)
 
     summary = run_job(runner)
 
     assert summary.status == "failed"
     assert fake_queue.completed == []
-    assert fake_queue.finished[0][0] == "failed"
-    assert "索引不存在" in fake_queue.finished[0][1]
+    status, message = fake_queue.finished[0]
+    assert status == "failed"
+    # 报错要能自解释: 既说清是什么缺失, 也说清自动构建为什么没成功
+    assert "索引不存在且自动构建失败" in message
+    assert "embedding 服务 401" in message
 
 
 def test_case_without_gold_is_marked_no_gold(patched):
@@ -428,8 +533,9 @@ def test_fatal_generation_error_aborts_job_instead_of_flooding_dead_letters(patc
     assert fake_queue.completed == []
     status, error = fake_queue.finished[0]
     assert status == "failed" and "402" in error
-    # 已领取但未处理的条目要归位, 否则会永远停在 running(进度条卡住 + 成为孤儿)
-    assert fake_queue.released_running == [7]
+    # 已领取但未处理的条目要归位, 否则会永远停在 running(进度条卡住 + 成为孤儿)。
+    # 注意: 续跑开始时也会归位一次(见 test_resume_releases...), 所以这里只要求"归位过"。
+    assert 7 in fake_queue.released_running
 
 
 def test_invalid_prompt_fails_job_before_touching_retrieval(patched):
@@ -649,7 +755,7 @@ def test_judge_fatal_error_aborts_job_and_releases_items(patched):
     assert fake_queue.completed == []
     assert len(fake_queue.failed) == 1, "只记当前这一条"
     assert "402" in fake_queue.finished[0][1]
-    assert fake_queue.released_running == [7]
+    assert 7 in fake_queue.released_running
 
 
 def test_judge_protocol_failure_is_retryable_not_persisted(patched):

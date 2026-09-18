@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,6 +33,44 @@ CORPUS_ID = int(os.getenv("LIVE_CORPUS_ID", "4"))
 DATASET_ID = int(os.getenv("LIVE_DATASET_ID", "3"))
 EXPECTED_CASES = 30
 EXPECTED_RECALL = 0.913889
+
+# M7-1 之后提交评测需要登录(editor 及以上), 所以这两条 live 测试也必须有账号。
+# 用户名口令从环境变量取(回落到仓库根目录 .env 里的 DEMO_EMAIL/DEMO_PASSWORD) ——
+# 没有账号就**跳过并说清楚怎么办**, 而不是抛一个 401 让人去猜。
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _env_or_dotenv(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    if not _ENV_FILE.exists():
+        return ""
+    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        key, _, raw = line.partition("=")
+        if key.strip() == name:
+            return raw.strip().strip("'\"")
+    return ""
+
+
+def api_token() -> str:
+    """登录拿一个 token(过期就重新登录, 不做缓存)。"""
+    email = _env_or_dotenv("LIVE_API_EMAIL") or _env_or_dotenv("DEMO_EMAIL")
+    password = _env_or_dotenv("LIVE_API_PASSWORD") or _env_or_dotenv("DEMO_PASSWORD")
+    if not email or not password:
+        pytest.skip(
+            "缺少登录口令: 设 LIVE_API_EMAIL / LIVE_API_PASSWORD"
+            "(或往 .env 里写 DEMO_EMAIL / DEMO_PASSWORD) —— M7-1 起提交评测需要登录",
+        )
+    response = httpx.post(
+        f"{API_BASE}/api/v1/auth/login",
+        json={"email": email, "password": password},
+        timeout=10.0,
+        trust_env=False,
+    )
+    if response.status_code != 200:
+        pytest.skip(f"登录失败({response.status_code}): 检查 LIVE_API_EMAIL / LIVE_API_PASSWORD 是否正确")
+    return str(response.json()["token"])
 
 
 @dataclass
@@ -70,9 +109,12 @@ def submit_run(settings: Settings) -> tuple[int, int]:
     response = httpx.post(
         f"{API_BASE}/api/v1/runs",
         json={"dataset_id": DATASET_ID, "corpus_id": CORPUS_ID, "top_k": 5},
+        headers={"Authorization": f"Bearer {api_token()}"},
         timeout=10.0,
         trust_env=False,
     )
+    if response.status_code == 403:
+        pytest.skip("这个账号没有 submit 权限: live 测试要用 editor 或 admin 账号")
     response.raise_for_status()
     payload = response.json()
     run_id = int(payload["run_id"])

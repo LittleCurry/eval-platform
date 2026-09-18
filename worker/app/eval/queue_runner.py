@@ -63,6 +63,7 @@ from app.queue import (
 from app.retrieval.anchor import AnchorSpec, GoldCase, map_dataset_cases
 from app.retrieval.chunker import ChunkingConfig, chunk_document, chunking_hash
 from app.retrieval.collections import collection_exists, collection_name
+from app.retrieval.indexer import index_corpus
 from app.retrieval.retriever import Retriever
 from app.store import get_generation_usage, get_judge_usage, list_cases, list_documents
 
@@ -318,6 +319,14 @@ class QueueRunner:
         qid_by_case_id = {row.id: row.qid for row in case_rows}
         question_by_case_id = {row.id: row.question for row in case_rows}
 
+        # 续跑前先"归位": 上一次执行如果被强杀(kill -9), 它已领取但没写结果的条目会停在 running,
+        # 而领取只认 pending —— 不归位就会**少跑几条却报成功**(实测踩到: 30 题只跑了 20 条,
+        # job 却是 succeeded, run 的 cases_evaluated=20)。接管逻辑只在心跳超时后生效,
+        # 手动把 job 放回队列 / 用 --job-id 重跑时不会经过它, 所以这里必须自己兜住。
+        released = release_running_items(self.dsn, job.id)
+        if released:
+            self.log.warning("resume_released_items", job_id=job.id, run_id=job.run_id, released_items=released)
+
         retriever = self._retriever_factory(self.settings, collection, top_k)
         succeeded = 0
         dead = 0
@@ -326,9 +335,36 @@ class QueueRunner:
 
         try:
             if not collection_exists(retriever.client, collection):
-                message = f"索引不存在: {collection}, 请先构建索引(index_corpus)"
-                finish_job(self.dsn, job.id, "failed", message)
-                return JobSummary(job.id, job.run_id, "failed", 0, 0, 0, _ms(started))
+                # 按本次 run 的切分配置**自动补建索引**。
+                #
+                # 为什么不是"直接失败让人去跑 CLI"(M7-6 回归时改的): 建索引以前只有
+                # `python -m app.cli.index_corpus` 一个入口, 于是同事在界面上传完文档、
+                # 点「提交评测」只会拿到一句"索引不存在, 请先构建索引(index_corpus)"——
+                # 他没有 shell, 全流程就断在这里。而 M7 的验收标准恰恰是"同事独立走完
+                # 建项目→导入数据→跑评测→看报告"。
+                #
+                # 安全性来自命名规则: collection 名由**语料库 + 切分指纹**推导
+                # (indexer.collection_name), 这里的 chunking_cfg 又来自本次 run 的配置快照,
+                # 所以补建出来的必然就是这次 run 要的那个集合, 不会串到别的配置上。
+                # 集合已存在时根本不进这条分支 —— 重复构建才是真的浪费 embedding。
+                self.log.info(
+                    "index_build_start",
+                    job_id=job.id, run_id=job.run_id, corpus_id=ctx.corpus_id,
+                    collection=collection, reason="collection_missing",
+                )
+                try:
+                    report = index_corpus(self.settings, ctx.corpus_id, chunking_cfg)
+                except Exception as exc:  # noqa: BLE001 - 建索引失败原因多样(网络/额度/权限/配置), 统一转成任务失败
+                    message = f"索引不存在且自动构建失败: {collection} —— {exc}"
+                    finish_job(self.dsn, job.id, "failed", message)
+                    self.log.error("index_build_failed", job_id=job.id, error=str(exc))
+                    return JobSummary(job.id, job.run_id, "failed", 0, 0, 0, _ms(started))
+                self.log.info(
+                    "index_build_done",
+                    job_id=job.id, collection=report.collection, docs=report.docs,
+                    chunks=report.chunks, embed_calls=report.embed_calls,
+                    embed_tokens=report.embed_tokens, elapsed_ms=report.elapsed_ms,
+                )
 
             try:
                 while True:
@@ -388,6 +424,23 @@ class QueueRunner:
             progress = job_progress(self.dsn, job.id)
             status = "failed" if progress["failed"] else "succeeded"
             error = f"{progress['failed']} 条用例失败(已达重试上限)" if progress["failed"] else ""
+
+            # 兜底: 没有可领取的条目 ≠ 任务做完了。若还剩 pending/running, 说明状态不一致
+            # (典型场景: 上一轮被强杀留下 running 条目, 或有人手工改过 job 状态) ——
+            # 这种情况必须以 failed 收尾并把数字写进错误里, 否则报告会以"成功"的姿态
+            # 少算一批题(cases_evaluated 小于 cases_total 而没有任何提示)。
+            unfinished = progress["pending"] + progress["running"]
+            if unfinished and not self._stopped_or_paused(processed):
+                status = "failed"
+                error = (
+                    f"队列状态不一致: 还有 {unfinished} 条用例未执行"
+                    f"(待跑 {progress['pending']} · 运行中 {progress['running']}); "
+                    "可能是上一轮被强杀后未归位 —— 重新提交或让 worker 接管该任务"
+                )
+                self.log.error(
+                    "job_unfinished_items", job_id=job.id, run_id=job.run_id,
+                    pending=progress["pending"], running=progress["running"],
+                )
             finish_job(self.dsn, job.id, status, error)
             update_run_metrics(
                 self.dsn, job.run_id,

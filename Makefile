@@ -2,7 +2,7 @@
         migrate-up migrate-down migrate-version \
         migrate-create worker-setup worker-test worker-lint worker-healthcheck jwt-secret \
         deploy-up deploy-down deploy-logs deploy-ps deploy-build backup \
-        attribution drill drill-compare compare parallel-demo test test-live lint verify
+        attribution drill drill-compare compare parallel-demo demo test test-live lint regress verify
 
 help: ## 显示可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F'## ' '{split($$1, t, ":"); printf "  \033[36m%-18s\033[0m %s\n", t[1], $$2}'
@@ -157,6 +157,10 @@ compare: ## 两次 run 逐题一致性对比: make compare LEFT=100 RIGHT=101
 parallel-demo: ## 并发演示(两个 job 并行) + 产出 A/B 数据
 	scripts/parallel_jobs_demo.sh
 
+# ---- 演示 (M7-6) ----
+demo: ## 20 分钟演示脚本(默认走已有 run, 不花 token): make demo [FULL=1]
+	scripts/demo.sh $(if $(FULL),--full,)
+
 # ---- 全量收口 ----
 test: ## 运行全部单测 (Go + Python + Web)
 	cd server && go test ./...
@@ -166,6 +170,28 @@ test: ## 运行全部单测 (Go + Python + Web)
 lint: ## 静态检查 (go vet + ruff)
 	cd server && go vet ./...
 	cd worker && .venv/bin/ruff check .
+
+# M7-6: 全量回归(不花 token)。演示/试用前跑这一条, 只要有一条红就别往下走。
+# 为什么不把它塞进 make test: test 是"快速单测", 这里是"交付前的整套体检"
+# (多了 gofmt、前端类型检查与生产构建、迁移文件成对性), 跑得慢一些但更接近"能不能交"。
+regress: ## 全量回归(不花 token): 格式 + 静态检查 + 三套单测 + 前端类型/构建 + 迁移成对性
+	@echo "== 1/6 Go 格式与静态检查 =="
+	@test -z "$$(cd server && gofmt -l .)" || { echo "gofmt 未通过:"; cd server && gofmt -l .; exit 1; }
+	cd server && go vet ./...
+	@echo "== 2/6 Go 单测 =="
+	cd server && go test ./...
+	@echo "== 3/6 worker 静态检查与单测 =="
+	cd worker && .venv/bin/ruff check .
+	cd worker && .venv/bin/pytest -q
+	@echo "== 4/6 前端单测 =="
+	cd web && pnpm test
+	@echo "== 5/6 前端类型检查与生产构建 =="
+	cd web && pnpm build
+	@echo "== 6/6 迁移文件成对性 =="
+	@ls server/migrations/*.up.sql | sed 's/\.up\.sql$$//' | while read -r base; do \
+	  test -f "$$base.down.sql" || { echo "缺少对应的 down 迁移: $$base"; exit 1; }; \
+	done
+	@echo "✅ 全量回归通过(集成测试另跑: make test-live)"
 
 test-live: ## 集成测试(连真实 PG/Qdrant/embedding; 需 .env 配好 key)
 	cd server && RUN_LIVE=1 go test ./internal/store/ -v
